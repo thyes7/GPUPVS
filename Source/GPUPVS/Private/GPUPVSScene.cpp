@@ -36,8 +36,9 @@
 
 FPVSScene::FPVSScene()
 {
-	PrecomputedVisibilitySettings.CellSize = 120.0f;
+	PrecomputedVisibilitySettings.CellSize = 200.0f;
 	PrecomputedVisibilitySettings.PlayAreaHeight = 220.0f;
+	PrecomputedVisibilitySettings.bPlaceCellsOnOpaqueOnly = true;
 }
 
 void FPVSScene::Reset()
@@ -50,6 +51,14 @@ void FPVSScene::Reset()
 	SceneIndices.Reset();
 	SceneNormals.Reset();
 	TriangleBounds.Reset();
+
+	OccluderVertices.Reset();
+	OccluderIndices.Reset();
+
+	VisibilityMeshBounds.Reset();
+	VisibilityWords.Reset();
+	VisibilityNumMeshes = 0;
+	VisibilityWordsPerCell = 0;
 }
 
 void FPVSScene::CollectFromWorld(UWorld* InWorld)
@@ -73,8 +82,10 @@ void FPVSScene::CollectFromWorld(UWorld* InWorld)
 	int32 NumSkippedUnregisteredOrTemplate = 0;
 	int32 NumSkippedMovable = 0;
 	int32 NumSkippedNonStaticMesh = 0;
-	int64 NumTrianglesAdded = 0;
-	int64 NumTrianglesSkippedByMaterial = 0;
+	int64 NumSetupTrianglesAdded = 0;
+	int64 NumOccluderTrianglesAdded = 0;
+	int64 NumSetupTrianglesSkippedByMaterial = 0;
+	int64 NumOccluderTrianglesSkippedByMaterial = 0;
 
 	// 遍历收集APrecomputedVisibilityVolume
 	for (TActorIterator<APrecomputedVisibilityVolume> It(InWorld); It; ++It)
@@ -135,21 +146,39 @@ void FPVSScene::CollectFromWorld(UWorld* InWorld)
 				{
 					const FBox3f WorldBox(Prim->Bounds.GetBox());
 
-					// 提取setup阶段信息：只将与任意 VisibilityVolume 相交的几何纳入“cell 放置/栅格化”输入
-					if (DoesBoxIntersectVisibilityVolume(WorldBox))
-					{
-						const FStaticMeshLODResources& LOD = StaticMesh->GetRenderData()->LODResources[0];
-						const FPositionVertexBuffer& PositionBuffer = LOD.VertexBuffers.PositionVertexBuffer;
-						const FStaticMeshVertexBuffer& StaticMeshVertexBuffer = LOD.VertexBuffers.StaticMeshVertexBuffer;
+					VisibilityMeshBounds.Add(WorldBox);
 
+					const FStaticMeshLODResources& LOD = StaticMesh->GetRenderData()->LODResources[0];
+					const FPositionVertexBuffer& PositionBuffer = LOD.VertexBuffers.PositionVertexBuffer;
+					const FStaticMeshVertexBuffer& StaticMeshVertexBuffer = LOD.VertexBuffers.StaticMeshVertexBuffer;
+					FIndexArrayView IndexView = LOD.IndexBuffer.GetArrayView();
+
+					const bool bForSetup = DoesBoxIntersectVisibilityVolume(WorldBox);
+
+					auto AppendOccluderVertices = [&]()
+					{
 						FTransform WorldTransform = StaticMeshComp->GetComponentTransform();
-						uint32 VertexOffset = SceneVertices.Num();
 						const uint32 NumVertices = PositionBuffer.GetNumVertices();
 
+						const uint32 VertexOffset = (uint32)OccluderVertices.Num();
+						OccluderVertices.Reserve(OccluderVertices.Num() + NumVertices);
+						for (uint32 i = 0; i < NumVertices; ++i)
+						{
+							FVector WorldPos = WorldTransform.TransformPosition((FVector)PositionBuffer.VertexPosition(i));
+							OccluderVertices.Add((FVector3f)WorldPos);
+						}
+						return VertexOffset;
+					};
+
+					auto AppendSetupVertices = [&]()
+					{
+						FTransform WorldTransform = StaticMeshComp->GetComponentTransform();
+						const uint32 NumVertices = PositionBuffer.GetNumVertices();
+
+						const uint32 VertexOffset = (uint32)SceneVertices.Num();
 						SceneVertices.Reserve(SceneVertices.Num() + NumVertices);
 						SceneNormals.Reserve(SceneNormals.Num() + NumVertices);
 
-						// 提取顶点法线
 						for (uint32 i = 0; i < NumVertices; ++i)
 						{
 							FVector WorldPos = WorldTransform.TransformPosition((FVector)PositionBuffer.VertexPosition(i));
@@ -159,35 +188,58 @@ void FPVSScene::CollectFromWorld(UWorld* InWorld)
 							WorldNormal.Normalize();
 							SceneNormals.Add((FVector3f)WorldNormal);
 						}
+						return VertexOffset;
+					};
 
-						FIndexArrayView IndexView = LOD.IndexBuffer.GetArrayView();
+					const uint32 OccluderVertexOffset = AppendOccluderVertices();
+					const uint32 SetupVertexOffset = bForSetup ? AppendSetupVertices() : 0u;
 
-						// 提取索引（跳过半透明材质）
-						for (int32 SectionIdx = 0; SectionIdx < LOD.Sections.Num(); ++SectionIdx)
+					for (int32 SectionIdx = 0; SectionIdx < LOD.Sections.Num(); ++SectionIdx)
+					{
+						const FStaticMeshSection& Section = LOD.Sections[SectionIdx];
+						UMaterialInterface* Mat = StaticMeshComp->GetMaterial(Section.MaterialIndex);
+
+						const bool bIsOpaque = !(Mat && Mat->GetBlendMode() != BLEND_Opaque);
+						const bool bAddOccluder = bIsOpaque;
+						const bool bAddSetup = bForSetup && (bIsOpaque || !PrecomputedVisibilitySettings.bPlaceCellsOnOpaqueOnly);
+
+						if (!bIsOpaque)
 						{
-							const FStaticMeshSection& Section = LOD.Sections[SectionIdx];
-							UMaterialInterface* Mat = StaticMeshComp->GetMaterial(Section.MaterialIndex);
-
-							// todo::mask，translucent等
-							if (Mat && Mat->GetBlendMode() != BLEND_Opaque)
+							NumOccluderTrianglesSkippedByMaterial += (int64)Section.NumTriangles;
+							if (bForSetup && PrecomputedVisibilitySettings.bPlaceCellsOnOpaqueOnly)
 							{
-								NumTrianglesSkippedByMaterial += (int64)Section.NumTriangles;
-								continue;
+								NumSetupTrianglesSkippedByMaterial += (int64)Section.NumTriangles;
+							}
+						}
+
+						for (uint32 TriangleIdx = 0; TriangleIdx < Section.NumTriangles; ++TriangleIdx)
+						{
+							const uint32 LocalIndex0 = IndexView[Section.FirstIndex + TriangleIdx * 3 + 0];
+							const uint32 LocalIndex1 = IndexView[Section.FirstIndex + TriangleIdx * 3 + 1];
+							const uint32 LocalIndex2 = IndexView[Section.FirstIndex + TriangleIdx * 3 + 2];
+
+							const uint32 OccIndex0 = LocalIndex0 + OccluderVertexOffset;
+							const uint32 OccIndex1 = LocalIndex1 + OccluderVertexOffset;
+							const uint32 OccIndex2 = LocalIndex2 + OccluderVertexOffset;
+
+							if (bAddOccluder)
+							{
+								OccluderIndices.Add(OccIndex0);
+								OccluderIndices.Add(OccIndex1);
+								OccluderIndices.Add(OccIndex2);
+								NumOccluderTrianglesAdded++;
 							}
 
-							for (uint32 TriangleIdx = 0; TriangleIdx < Section.NumTriangles; ++TriangleIdx)
+							if (bAddSetup)
 							{
-								const uint32 LocalIndex0 = IndexView[Section.FirstIndex + TriangleIdx * 3 + 0];
-								const uint32 LocalIndex1 = IndexView[Section.FirstIndex + TriangleIdx * 3 + 1];
-								const uint32 LocalIndex2 = IndexView[Section.FirstIndex + TriangleIdx * 3 + 2];
-								const uint32 GlobalIndex0 = LocalIndex0 + VertexOffset;
-								const uint32 GlobalIndex1 = LocalIndex1 + VertexOffset;
-								const uint32 GlobalIndex2 = LocalIndex2 + VertexOffset;
+								const uint32 GlobalIndex0 = LocalIndex0 + SetupVertexOffset;
+								const uint32 GlobalIndex1 = LocalIndex1 + SetupVertexOffset;
+								const uint32 GlobalIndex2 = LocalIndex2 + SetupVertexOffset;
 
 								SceneIndices.Add(GlobalIndex0);
 								SceneIndices.Add(GlobalIndex1);
 								SceneIndices.Add(GlobalIndex2);
-								NumTrianglesAdded++;
+								NumSetupTrianglesAdded++;
 
 								FBox3f TriBounds(ForceInit);
 								TriBounds += SceneVertices[GlobalIndex0];
@@ -225,12 +277,19 @@ void FPVSScene::CollectFromWorld(UWorld* InWorld)
 		NumSkippedUnregisteredOrTemplate,
 		NumSkippedMovable,
 		NumSkippedNonStaticMesh);
-	GPUPVS_LOG(Log, TEXT("[Collect] Vertices=%lld Triangles=%lld AddedTriangles=%lld SkippedTrianglesByMaterial=%lld Time=%.3fs"),
+	GPUPVS_LOG(Log, TEXT("[Collect] Vertices=%lld Triangles=%lld SetupTrianglesAdded=%lld OccluderTrianglesAdded=%lld SkippedTrianglesByMaterial=%lld Time=%.3fs"),
 		NumVertices,
 		NumTriangles,
-		NumTrianglesAdded,
-		NumTrianglesSkippedByMaterial,
+		NumSetupTrianglesAdded,
+		NumOccluderTrianglesAdded,
+		NumSetupTrianglesSkippedByMaterial,
 		EndTime - StartTime);
+	GPUPVS_LOG(Log, TEXT("[Collect] PlaceCellsOnOpaqueOnly=%s OccluderSkippedByMaterial=%lld SetupSkippedByMaterial=%lld"),
+		PrecomputedVisibilitySettings.bPlaceCellsOnOpaqueOnly ? TEXT("true") : TEXT("false"),
+		NumOccluderTrianglesSkippedByMaterial,
+		NumSetupTrianglesSkippedByMaterial);
+
+	VisibilityNumMeshes = (uint32)VisibilityMeshBounds.Num();
 }
 
 bool FPVSScene::DoesBoxIntersectVisibilityVolume(const FBox3f& Box) const

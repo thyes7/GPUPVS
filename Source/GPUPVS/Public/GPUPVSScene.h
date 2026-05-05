@@ -44,6 +44,7 @@ class Settings
 public:
     float CellSize;
 	float PlayAreaHeight;
+	bool bPlaceCellsOnOpaqueOnly = true;
 };
 
 /**
@@ -73,6 +74,9 @@ public:
 	bool DoesBoxIntersectVisibilityVolume(const FBox3f& Box) const;
 
 	const Settings& GetSettings() const { return PrecomputedVisibilitySettings; }
+	void SetCellSize(float InCellSize) { PrecomputedVisibilitySettings.CellSize = InCellSize; }
+	void SetPlayAreaHeight(float InPlayAreaHeight) { PrecomputedVisibilitySettings.PlayAreaHeight = InPlayAreaHeight; }
+	void SetPlaceCellsOnOpaqueOnly(bool bInPlaceCellsOnOpaqueOnly) { PrecomputedVisibilitySettings.bPlaceCellsOnOpaqueOnly = bInPlaceCellsOnOpaqueOnly; }
 	void SetVisibilityBounds(const FBox3f& InBounds) { VisibilityBounds = InBounds; }
 
     const TArray<FPVSCell>&   GetCells()   const { return Cells; }
@@ -90,6 +94,21 @@ public:
 	/** PVS Volumes 列表。 */
 	const TArray<FPrecomputedVisibilityVolume>& GetPrecomputedVisibilityVolumes() const { return PrecomputedVisibilityVolumes; }
 
+	const TArray<FVector3f>& GetOccluderVertices() const { return OccluderVertices; }
+	const TArray<uint32>& GetOccluderIndices() const { return OccluderIndices; }
+
+	const TArray<FBox3f>& GetVisibilityMeshBounds() const { return VisibilityMeshBounds; }
+
+	uint32 GetVisibilityNumMeshes() const { return VisibilityNumMeshes; }
+	uint32 GetVisibilityWordsPerCell() const { return VisibilityWordsPerCell; }
+	const TArray<uint32>& GetVisibilityWords() const { return VisibilityWords; }
+	void SetVisibilityWords(TArray<uint32>&& InVisibilityWords, uint32 InNumMeshes, uint32 InWordsPerCell)
+	{
+		VisibilityWords = MoveTemp(InVisibilityWords);
+		VisibilityNumMeshes = InNumMeshes;
+		VisibilityWordsPerCell = InWordsPerCell;
+	}
+
 private:
     Settings PrecomputedVisibilitySettings;
 
@@ -103,4 +122,12 @@ private:
 	TArray<uint32> SceneIndices;
 	TArray<FVector3f> SceneNormals;
 	TArray<FBox3f> TriangleBounds;
+
+	TArray<FVector3f> OccluderVertices;
+	TArray<uint32> OccluderIndices;
+
+	TArray<FBox3f> VisibilityMeshBounds;
+	TArray<uint32> VisibilityWords;
+	uint32 VisibilityNumMeshes = 0;
+	uint32 VisibilityWordsPerCell = 0;
 };

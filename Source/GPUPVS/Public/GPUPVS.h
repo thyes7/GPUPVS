@@ -47,6 +47,12 @@ private:
     int32 RasterMaxLayersLimit;
     int32 VisibilityRayCount;
     float VisibilityMaxDistance;
+	int32 VisibilityNumCellSamples;
+	int32 VisibilityMinMeshSamples;
+	int32 VisibilityMaxMeshSamples;
+	int32 VisibilityNumImportanceSamples;
+	float VisibilityMeshBoundsScale;
+	int32 VisibilityBVHLeafTriLimit;
 
 	void ResetRasterResults();
     void InitDefaultParams();
