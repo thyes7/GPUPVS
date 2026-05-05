@@ -87,21 +87,20 @@ IMPLEMENT_GLOBAL_SHADER(FVisibilityCS, "/Plugin/GPUPVS/Private/GPUPVSVisibilityC
 // ========================================
 void FShaderDispatcher::DispatchSimpleCS(FRDGBuilder& GraphBuilder, uint32 IntA, uint32 IntB)
 {
-	// 1. 创建 RDG 结构化缓冲（1 个 int32），作为输出
+	// 创建输出缓冲（1 个 int32）
 	FRDGBufferDesc BufferDesc = FRDGBufferDesc::CreateStructuredDesc(sizeof(int32), 1);
 	FRDGBufferRef  OutputBuffer = GraphBuilder.CreateBuffer(BufferDesc, TEXT("GPUPVS_Result"));
 	FRDGBufferUAVRef OutputUAV = GraphBuilder.CreateUAV(OutputBuffer);
 
-	// 2. 设置着色器参数
+	// 绑定参数
 	FSimpleCS::FParameters* Parameters = GraphBuilder.AllocParameters<FSimpleCS::FParameters>();
 	Parameters->IntA = IntA;
 	Parameters->IntB = IntB;
-	Parameters->OutputBuffer = OutputUAV;  // 这里仍然是 RDG UAV，和以前一致
+	Parameters->OutputBuffer = OutputUAV;
 
-	// 3. 获取 shader
 	TShaderMapRef<FSimpleCS> SimpleShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
 
-	// 4. 添加 Compute Pass（不做任何 readback）
+	// 调度（不做 readback）
 	FComputeShaderUtils::AddPass(
 		GraphBuilder,
 		RDG_EVENT_NAME("SimpleComputePass"),

@@ -5,6 +5,10 @@
 
 #include "GPUPVSEditorSettings.generated.h"
 
+/**
+ * 编辑器面板参数。
+ * 仅用于当前会话的调试迭代，不写入配置文件。
+ */
 UCLASS()
 class UGPUPVSEditorSettings : public UObject
 {
@@ -24,12 +28,14 @@ public:
 	int32 RasterMaxLayersLimit = 64;
 
 	UPROPERTY(EditAnywhere, Category = "Compute")
+	/** 距离裁剪（0 表示不裁剪）。 */
 	float VisibilityMaxDistance = 5000.0f;
 
 	UPROPERTY(EditAnywhere, Category = "Compute")
 	float MeshBoundsScale = 1.2f;
 
 	UPROPERTY(EditAnywhere, Category = "Compute")
+	/** 采样强度：越大越稳健，代价越高。 */
 	int32 NumCellSamples = 24;
 
 	UPROPERTY(EditAnywhere, Category = "Compute")
@@ -47,4 +53,3 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Visualize")
 	bool bDrawCells = false;
 };
-

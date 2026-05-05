@@ -94,10 +94,10 @@ void FGPUPVSBVHBuilder::Build(
 	TConstArrayView<uint32> Indices,
 	int32 LeafTriangleLimit,
 	TArray<FGPUPVSBVHNode>& OutNodes,
-	TArray<uint32>& OutLeafTriangleIndices)
+	TArray<uint32>& OutLeafTriIndices)
 {
 	OutNodes.Reset();
-	OutLeafTriangleIndices.Reset();
+	OutLeafTriIndices.Reset();
 
 	const uint32 NumTriangles = (uint32)(Indices.Num() / 3);
 	if (VerticesWS.IsEmpty() || Indices.IsEmpty() || NumTriangles == 0 || LeafTriangleLimit <= 0)
@@ -130,7 +130,7 @@ void FGPUPVSBVHBuilder::Build(
 	}
 
 	OutNodes.Reserve((int32)NumTriangles * 2);
-	OutLeafTriangleIndices.Reserve((int32)NumTriangles);
-	BuildNodeRecursive(TriRefs, 0, (int32)NumTriangles, LeafTriangleLimit, OutNodes, OutLeafTriangleIndices);
+	OutLeafTriIndices.Reserve((int32)NumTriangles);
+	BuildNodeRecursive(TriRefs, 0, (int32)NumTriangles, LeafTriangleLimit, OutNodes, OutLeafTriIndices);
 }
 

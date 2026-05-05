@@ -1,16 +1,6 @@
 /**
- * 场景数据采集与扁平化实现。
- *
- * 输出数据面向“预计算可见性”的最小闭环：
- * - PrecomputedVisibilityVolumes：PVS 体积边界（Brush Bounds）。
- * - SceneVertices / SceneIndices：世界空间三角形网格（当前仅收集 StaticMeshComponent 的 LOD0，且跳过非 Opaque section）。
- * - TriangleBounds：每三角形包围盒，用于后续加速结构或粗剔除。
- *
- * 约束：
- * - 目前只处理 Static/Stationary（Movable 直接跳过）。
- * - 暂未支持 ISM/HISM/Landscape（可按需要补充 Geometry Provider）。
- * - 目前仅处理 Opaque section，跳过透明或不透明的 section。
- * - Setup 阶段几何做了筛选：仅采集与任意 VisibilityVolume 相交的三角形。
+ * 场景采集与扁平化。
+ * 仅保留 PVS 构建所需的数据：Volumes、Setup 几何、遮挡几何、可见性目标 Bounds。
  */
 #include "GPUPVSScene.h"
 #include "Engine/World.h"
@@ -36,9 +26,9 @@
 
 FPVSScene::FPVSScene()
 {
-	PrecomputedVisibilitySettings.CellSize = 200.0f;
-	PrecomputedVisibilitySettings.PlayAreaHeight = 220.0f;
-	PrecomputedVisibilitySettings.bPlaceCellsOnOpaqueOnly = true;
+	VisibilitySettings.CellSize = 200.0f;
+	VisibilitySettings.PlayAreaHeight = 220.0f;
+	VisibilitySettings.bPlaceCellsOnOpaqueOnly = true;
 }
 
 void FPVSScene::Reset()
@@ -201,12 +191,12 @@ void FPVSScene::CollectFromWorld(UWorld* InWorld)
 
 						const bool bIsOpaque = !(Mat && Mat->GetBlendMode() != BLEND_Opaque);
 						const bool bAddOccluder = bIsOpaque;
-						const bool bAddSetup = bForSetup && (bIsOpaque || !PrecomputedVisibilitySettings.bPlaceCellsOnOpaqueOnly);
+					const bool bAddSetup = bForSetup && (bIsOpaque || !VisibilitySettings.bPlaceCellsOnOpaqueOnly);
 
 						if (!bIsOpaque)
 						{
 							NumOccluderTrianglesSkippedByMaterial += (int64)Section.NumTriangles;
-							if (bForSetup && PrecomputedVisibilitySettings.bPlaceCellsOnOpaqueOnly)
+						if (bForSetup && VisibilitySettings.bPlaceCellsOnOpaqueOnly)
 							{
 								NumSetupTrianglesSkippedByMaterial += (int64)Section.NumTriangles;
 							}
@@ -250,8 +240,6 @@ void FPVSScene::CollectFromWorld(UWorld* InWorld)
 						}
 					}
 
-					// 提取compute阶段信息
-					// TODO
 				}
 			}
 			else {
@@ -269,7 +257,7 @@ void FPVSScene::CollectFromWorld(UWorld* InWorld)
 		TotalPVSBounds.IsValid ? TEXT("true") : TEXT("false"),
 		*TotalPVSBounds.Min.ToString(),
 		*TotalPVSBounds.Max.ToString(),
-		PrecomputedVisibilitySettings.CellSize);
+		VisibilitySettings.CellSize);
 	GPUPVS_LOG(Log, TEXT("[Collect] Actors=%d Prims=%d SMComps=%d Skipped(Unreg/Template)=%d Skipped(Movable)=%d Skipped(NonSM)=%d"),
 		NumActors,
 		NumPrimitiveComponents,
@@ -285,7 +273,7 @@ void FPVSScene::CollectFromWorld(UWorld* InWorld)
 		NumSetupTrianglesSkippedByMaterial,
 		EndTime - StartTime);
 	GPUPVS_LOG(Log, TEXT("[Collect] PlaceCellsOnOpaqueOnly=%s OccluderSkippedByMaterial=%lld SetupSkippedByMaterial=%lld"),
-		PrecomputedVisibilitySettings.bPlaceCellsOnOpaqueOnly ? TEXT("true") : TEXT("false"),
+		VisibilitySettings.bPlaceCellsOnOpaqueOnly ? TEXT("true") : TEXT("false"),
 		NumOccluderTrianglesSkippedByMaterial,
 		NumSetupTrianglesSkippedByMaterial);
 
@@ -332,8 +320,8 @@ FBox3f FPVSScene::GetAlignedVisibilityVolumeBounds() const
 	if (PrecomputedVisibilityVolumes.Num() > 0)
 	{
 		FVector3f DoubleExtent = Bounds.GetExtent() * 2.0f;
-		DoubleExtent.X = DoubleExtent.X - FMath::Fmod(DoubleExtent.X, PrecomputedVisibilitySettings.CellSize) + PrecomputedVisibilitySettings.CellSize;
-		DoubleExtent.Y = DoubleExtent.Y - FMath::Fmod(DoubleExtent.Y, PrecomputedVisibilitySettings.CellSize) + PrecomputedVisibilitySettings.CellSize;
+		DoubleExtent.X = DoubleExtent.X - FMath::Fmod(DoubleExtent.X, VisibilitySettings.CellSize) + VisibilitySettings.CellSize;
+		DoubleExtent.Y = DoubleExtent.Y - FMath::Fmod(DoubleExtent.Y, VisibilitySettings.CellSize) + VisibilitySettings.CellSize;
 		Bounds.Max = Bounds.Min + DoubleExtent;
 		return Bounds;
 	}

@@ -26,7 +26,6 @@ struct FPVSCell
 
 /**
  * 预计算可见性体积：对应关卡内的 APrecomputedVisibilityVolume。
- 
  */
 class FPrecomputedVisibilityVolume
 {
@@ -36,10 +35,9 @@ public:
 };
 
 /**
- * 预计算可见性参数（硬编码）。
- * 后续可扩展对齐 UE 的 FPrecomputedVisibilitySettings。
+ * 预计算可见性参数（插件内使用）。
  */
-class Settings
+class FGPUPVSVisibilitySettings
 {
 public:
     float CellSize;
@@ -73,10 +71,10 @@ public:
 	FBox3f GetAlignedVisibilityVolumeBounds() const;
 	bool DoesBoxIntersectVisibilityVolume(const FBox3f& Box) const;
 
-	const Settings& GetSettings() const { return PrecomputedVisibilitySettings; }
-	void SetCellSize(float InCellSize) { PrecomputedVisibilitySettings.CellSize = InCellSize; }
-	void SetPlayAreaHeight(float InPlayAreaHeight) { PrecomputedVisibilitySettings.PlayAreaHeight = InPlayAreaHeight; }
-	void SetPlaceCellsOnOpaqueOnly(bool bInPlaceCellsOnOpaqueOnly) { PrecomputedVisibilitySettings.bPlaceCellsOnOpaqueOnly = bInPlaceCellsOnOpaqueOnly; }
+	const FGPUPVSVisibilitySettings& GetSettings() const { return VisibilitySettings; }
+	void SetCellSize(float InCellSize) { VisibilitySettings.CellSize = InCellSize; }
+	void SetPlayAreaHeight(float InPlayAreaHeight) { VisibilitySettings.PlayAreaHeight = InPlayAreaHeight; }
+	void SetPlaceCellsOnOpaqueOnly(bool bInPlaceCellsOnOpaqueOnly) { VisibilitySettings.bPlaceCellsOnOpaqueOnly = bInPlaceCellsOnOpaqueOnly; }
 	void SetVisibilityBounds(const FBox3f& InBounds) { VisibilityBounds = InBounds; }
 
     const TArray<FPVSCell>&   GetCells()   const { return Cells; }
@@ -94,9 +92,11 @@ public:
 	/** PVS Volumes 列表。 */
 	const TArray<FPrecomputedVisibilityVolume>& GetPrecomputedVisibilityVolumes() const { return PrecomputedVisibilityVolumes; }
 
+	/** 遮挡几何（用于光追遮挡，静态不透明）。 */
 	const TArray<FVector3f>& GetOccluderVertices() const { return OccluderVertices; }
 	const TArray<uint32>& GetOccluderIndices() const { return OccluderIndices; }
 
+	/** 可见性目标列表（每个目标一个 Bounds，对应 bitset 的索引）。 */
 	const TArray<FBox3f>& GetVisibilityMeshBounds() const { return VisibilityMeshBounds; }
 
 	uint32 GetVisibilityNumMeshes() const { return VisibilityNumMeshes; }
@@ -110,7 +110,7 @@ public:
 	}
 
 private:
-    Settings PrecomputedVisibilitySettings;
+    FGPUPVSVisibilitySettings VisibilitySettings;
 
 	FBox3f VisibilityBounds = FBox3f(ForceInit);
 

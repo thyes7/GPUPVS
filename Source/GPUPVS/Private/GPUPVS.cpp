@@ -569,45 +569,50 @@ void FGPUPVS::SetupPrecomputedVisibility()
 
 void FGPUPVS::ComputeVisibility()
 {
-	const TArray<FPVSCell>& Cells = Scene.GetCells();
-	const TArray<FBox3f>& MeshBounds = Scene.GetVisibilityMeshBounds();
-	const TArray<FVector3f>& OccVertices = Scene.GetOccluderVertices();
-	const TArray<uint32>& OccIndices = Scene.GetOccluderIndices();
+	/**
+	 * Compute：
+	 * - Group pass：粗可见性（输出 group bitset）
+	 * - Mesh pass：细可见性（依赖 group bitset 做快速跳过，输出 mesh bitset）
+	 */
+	const TArray<FPVSCell>& CellList = Scene.GetCells();
+	const TArray<FBox3f>& VisibilityMeshBounds = Scene.GetVisibilityMeshBounds();
+	const TArray<FVector3f>& OccluderVertices = Scene.GetOccluderVertices();
+	const TArray<uint32>& OccluderIndices = Scene.GetOccluderIndices();
 
-	if (Cells.IsEmpty() || MeshBounds.IsEmpty() || OccVertices.IsEmpty() || OccIndices.IsEmpty())
+	if (CellList.IsEmpty() || VisibilityMeshBounds.IsEmpty() || OccluderVertices.IsEmpty() || OccluderIndices.IsEmpty())
 	{
 		GPUPVS_LOG(Warning, TEXT("[Compute] EarlyOut Cells=%d Meshes=%d OccVertices=%d OccTriangles=%d"),
-			Cells.Num(),
-			MeshBounds.Num(),
-			OccVertices.Num(),
-			OccIndices.Num() / 3);
+			CellList.Num(),
+			VisibilityMeshBounds.Num(),
+			OccluderVertices.Num(),
+			OccluderIndices.Num() / 3);
 		Scene.SetVisibilityWords({}, 0, 0);
 		return;
 	}
 
 	const double BuildStartTime = FPlatformTime::Seconds();
 
-	TArray<FGPUPVSBVHNode> BVHNodesCPU;
-	TArray<uint32> BVHLeafTriIndicesCPU;
+	TArray<FGPUPVSBVHNode> BvhNodes;
+	TArray<uint32> BvhLeafTriIndices;
 	FGPUPVSBVHBuilder::Build(
-		OccVertices,
-		OccIndices,
+		OccluderVertices,
+		OccluderIndices,
 		VisibilityBVHLeafTriLimit,
-		BVHNodesCPU,
-		BVHLeafTriIndicesCPU);
+		BvhNodes,
+		BvhLeafTriIndices);
 
-	if (BVHNodesCPU.IsEmpty() || BVHLeafTriIndicesCPU.IsEmpty())
+	if (BvhNodes.IsEmpty() || BvhLeafTriIndices.IsEmpty())
 	{
 		GPUPVS_LOG(Error, TEXT("[Compute] BVH build failed. Nodes=%d LeafTris=%d"),
-			BVHNodesCPU.Num(),
-			BVHLeafTriIndicesCPU.Num());
+			BvhNodes.Num(),
+			BvhLeafTriIndices.Num());
 		Scene.SetVisibilityWords({}, 0, 0);
 		return;
 	}
 
-	const int32 BVHNodesCount = BVHNodesCPU.Num();
-	const int32 BVHLeafTriCount = BVHLeafTriIndicesCPU.Num();
-	const uint32 OccluderTriangleCount = (uint32)(OccIndices.Num() / 3);
+	const int32 BVHNodesCount = BvhNodes.Num();
+	const int32 BVHLeafTriCount = BvhLeafTriIndices.Num();
+	const uint32 OccluderTriangleCount = (uint32)(OccluderIndices.Num() / 3);
 	if ((uint32)BVHLeafTriCount != OccluderTriangleCount)
 	{
 		GPUPVS_LOG(Warning, TEXT("[Compute] BVH leaf triangle count mismatch. BVHLeafTris=%d OccluderTriangles=%u"),
@@ -615,27 +620,27 @@ void FGPUPVS::ComputeVisibility()
 			OccluderTriangleCount);
 	}
 
-	TArray<FGPUPVSBox3f> CellsCPU;
-	CellsCPU.Reserve(Cells.Num());
-	for (const FPVSCell& Cell : Cells)
+	TArray<FGPUPVSBox3f> CellBoxes;
+	CellBoxes.Reserve(CellList.Num());
+	for (const FPVSCell& Cell : CellList)
 	{
 		FGPUPVSBox3f B;
 		B.Min = Cell.Bounds.Min;
 		B.Max = Cell.Bounds.Max;
-		CellsCPU.Add(B);
+		CellBoxes.Add(B);
 	}
 
-	TArray<FGPUPVSBox3f> MeshesCPU;
-	MeshesCPU.Reserve(MeshBounds.Num());
-	for (const FBox3f& B0 : MeshBounds)
+	TArray<FGPUPVSBox3f> MeshBoxes;
+	MeshBoxes.Reserve(VisibilityMeshBounds.Num());
+	for (const FBox3f& B0 : VisibilityMeshBounds)
 	{
 		FGPUPVSBox3f B;
 		B.Min = B0.Min;
 		B.Max = B0.Max;
-		MeshesCPU.Add(B);
+		MeshBoxes.Add(B);
 	}
 
-	auto BuildGroups = [&](TConstArrayView<FBox3f> InMeshBounds, TArray<FGPUPVSBox3f>& OutGroups, TArray<uint32>& OutMeshToGroup)
+	auto BuildVisibilityGroups = [&](TConstArrayView<FBox3f> InMeshBounds, TArray<FGPUPVSBox3f>& OutGroups, TArray<uint32>& OutMeshToGroup)
 	{
 		OutGroups.Reset();
 		OutMeshToGroup.SetNumUninitialized(InMeshBounds.Num());
@@ -655,15 +660,15 @@ void FGPUPVS::ComputeVisibility()
 			float Distance = 0.0f;
 		};
 
-		TArray<FSortInfo> SortMeshes;
-		SortMeshes.Reserve(InMeshBounds.Num());
+		TArray<FSortInfo> SortedBounds;
+		SortedBounds.Reserve(InMeshBounds.Num());
 		for (const FBox3f& B : InMeshBounds)
 		{
 			if (B.IsValid)
 			{
 				FSortInfo Info;
 				Info.Bounds = B;
-				SortMeshes.Add(Info);
+				SortedBounds.Add(Info);
 			}
 		}
 
@@ -678,7 +683,7 @@ void FGPUPVS::ComputeVisibility()
 			FVector3f(-1, -1, -1),
 		};
 
-		for (FSortInfo& M : SortMeshes)
+		for (FSortInfo& M : SortedBounds)
 		{
 			const FVector3f BoxCenter = M.Bounds.GetCenter();
 			const FVector3f BoxExtent = M.Bounds.GetExtent();
@@ -691,21 +696,22 @@ void FGPUPVS::ComputeVisibility()
 			M.Distance = LocalDistance;
 		}
 
-		SortMeshes.Sort([](const FSortInfo& A, const FSortInfo& B)
+		SortedBounds.Sort([](const FSortInfo& A, const FSortInfo& B)
 		{
 			return A.Distance < B.Distance;
 		});
 
 		FBox3f VisibilityGridBounds(ForceInit);
-		const int32 MaxMeshIndex = FMath::Min(FMath::Max(FMath::TruncToInt(0.9f * SortMeshes.Num()), 1), SortMeshes.Num() - 1);
+		// 对齐 Lightmass：剔除最远 10% 的 mesh，避免远处巨物（天空盒）撑爆网格范围
+		const int32 MaxMeshIndex = FMath::Min(FMath::Max(FMath::TruncToInt(0.9f * SortedBounds.Num()), 1), SortedBounds.Num() - 1);
 		for (int32 i = 0; i < MaxMeshIndex; ++i)
 		{
-			VisibilityGridBounds += SortMeshes[i].Bounds;
+			VisibilityGridBounds += SortedBounds[i].Bounds;
 		}
 
 		const float TargetNumGroupsAsFractionOfMeshes = 0.3f;
 		const int32 ZDimensionDivisor = 4;
-		const int32 GridXY = FMath::Max(FMath::TruncToInt(FMath::Pow((float)ZDimensionDivisor * TargetNumGroupsAsFractionOfMeshes * (float)SortMeshes.Num(), 1.0f / 3.0f)), 1);
+		const int32 GridXY = FMath::Max(FMath::TruncToInt(FMath::Pow((float)ZDimensionDivisor * TargetNumGroupsAsFractionOfMeshes * (float)SortedBounds.Num(), 1.0f / 3.0f)), 1);
 		const int32 GridZ = FMath::Max(GridXY / ZDimensionDivisor, 1);
 
 		const FVector3f Denom = FVector3f(
@@ -798,42 +804,42 @@ void FGPUPVS::ComputeVisibility()
 		}
 	};
 
-	TArray<FGPUPVSBox3f> GroupsCPU;
-	TArray<uint32> MeshToGroupCPU;
-	BuildGroups(MeshBounds, GroupsCPU, MeshToGroupCPU);
+	TArray<FGPUPVSBox3f> GroupBoxes;
+	TArray<uint32> MeshToGroup;
+	BuildVisibilityGroups(VisibilityMeshBounds, GroupBoxes, MeshToGroup);
 	int32 NumMappedMeshes = 0;
-	for (uint32 G : MeshToGroupCPU)
+	for (uint32 G : MeshToGroup)
 	{
 		if (G != 0xFFFFFFFFu)
 		{
 			NumMappedMeshes++;
 		}
 	}
-	LastGroupsBuilt = GroupsCPU.Num();
+	LastGroupsBuilt = GroupBoxes.Num();
 	LastMappedMeshes = NumMappedMeshes;
 	GPUPVS_LOG(Log, TEXT("[Compute] GroupsBuilt=%d Meshes=%d MappedMeshes=%d"),
-		GroupsCPU.Num(),
-		MeshBounds.Num(),
+		GroupBoxes.Num(),
+		VisibilityMeshBounds.Num(),
 		NumMappedMeshes);
 
-	TArray<FGPUPVSBVHNodeGPU> BVHNodesGPU;
-	BVHNodesGPU.Reserve(BVHNodesCPU.Num());
-	for (const FGPUPVSBVHNode& N0 : BVHNodesCPU)
+	TArray<FGPUPVSBVHNodeGPU> BvhNodesGpu;
+	BvhNodesGpu.Reserve(BvhNodes.Num());
+	for (const FGPUPVSBVHNode& N0 : BvhNodes)
 	{
 		FGPUPVSBVHNodeGPU N;
 		N.BoundsMin = N0.BoundsMin;
 		N.BoundsMax = N0.BoundsMax;
 		N.LeftChildOrFirstTri = N0.LeftChildOrFirstTri;
 		N.RightChildOrTriCount = N0.RightChildOrTriCount;
-		BVHNodesGPU.Add(N);
+		BvhNodesGpu.Add(N);
 	}
 
-	const uint32 NumMeshes = (uint32)MeshesCPU.Num();
+	const uint32 NumMeshes = (uint32)MeshBoxes.Num();
 	const uint32 WordsPerCell = FMath::DivideAndRoundUp(NumMeshes, 32u);
-	const uint32 TotalWords = (uint32)CellsCPU.Num() * WordsPerCell;
-	const uint32 NumGroups = (uint32)GroupsCPU.Num();
+	const uint32 TotalWords = (uint32)CellBoxes.Num() * WordsPerCell;
+	const uint32 NumGroups = (uint32)GroupBoxes.Num();
 
-	struct FVisibilityReadbackState
+	struct FVisibilityReadback
 	{
 		FRHIGPUBufferReadback* WordsReadback = nullptr;
 		FRHIGPUBufferReadback* StatsReadback = nullptr;
@@ -845,39 +851,39 @@ void FGPUPVS::ComputeVisibility()
 		uint32 GroupWordsPerCell = 0;
 	};
 
-	const TSharedRef<FVisibilityReadbackState, ESPMode::ThreadSafe> ReadbackState = MakeShared<FVisibilityReadbackState, ESPMode::ThreadSafe>();
-	ReadbackState->NumMeshes = NumMeshes;
-	ReadbackState->WordsPerCell = WordsPerCell;
-	ReadbackState->TotalWords = TotalWords;
-	ReadbackState->NumGroups = NumGroups;
+	const TSharedRef<FVisibilityReadback, ESPMode::ThreadSafe> Readback = MakeShared<FVisibilityReadback, ESPMode::ThreadSafe>();
+	Readback->NumMeshes = NumMeshes;
+	Readback->WordsPerCell = WordsPerCell;
+	Readback->TotalWords = TotalWords;
+	Readback->NumGroups = NumGroups;
 
 	ENQUEUE_RENDER_COMMAND(GPUPVS_Visibility)(
-		[CellsData = MoveTemp(CellsCPU),
-		 MeshesData = MoveTemp(MeshesCPU),
-		 GroupsData = MoveTemp(GroupsCPU),
-		 MeshToGroupData = MoveTemp(MeshToGroupCPU),
-		 NodesData = MoveTemp(BVHNodesGPU),
-		 LeafTrisData = MoveTemp(BVHLeafTriIndicesCPU),
-		 OccVerticesCopy = OccVertices,
-		 OccIndicesCopy = OccIndices,
+		[CellBoxesData = MoveTemp(CellBoxes),
+		 MeshBoxesData = MoveTemp(MeshBoxes),
+		 GroupBoxesData = MoveTemp(GroupBoxes),
+		 MeshToGroupData = MoveTemp(MeshToGroup),
+		 NodesData = MoveTemp(BvhNodesGpu),
+		 LeafTrisData = MoveTemp(BvhLeafTriIndices),
+		 OccluderVerticesCopy = OccluderVertices,
+		 OccluderIndicesCopy = OccluderIndices,
 		 NumCellSamples = (uint32)FMath::Max(0, VisibilityNumCellSamples),
 		 MinMeshSamples = (uint32)FMath::Max(1, VisibilityMinMeshSamples),
 		 MaxMeshSamples = (uint32)FMath::Max(1, VisibilityMaxMeshSamples),
 		 NumImportanceSamples = (uint32)FMath::Max(0, VisibilityNumImportanceSamples),
 		 MeshBoundsScale = VisibilityMeshBoundsScale,
 		 MaxDistance = VisibilityMaxDistance,
-		 ReadbackState](FRHICommandListImmediate& RHICmdList)
+		 Readback](FRHICommandListImmediate& RHICmdList)
 		{
 			FRDGBuilder GraphBuilder(RHICmdList);
 
 			const auto GroupOutputs = FShaderDispatcher::DispatchVisibilityGroups(
 				GraphBuilder,
-				CellsData,
-				GroupsData,
+				CellBoxesData,
+				GroupBoxesData,
 				NodesData,
 				LeafTrisData,
-				OccVerticesCopy,
-				OccIndicesCopy,
+				OccluderVerticesCopy,
+				OccluderIndicesCopy,
 				NumCellSamples,
 				MinMeshSamples,
 				MaxMeshSamples,
@@ -885,20 +891,20 @@ void FGPUPVS::ComputeVisibility()
 				MeshBoundsScale,
 				MaxDistance);
 
-			ReadbackState->GroupWordsPerCell = GroupOutputs.GroupWordsPerCell;
+			Readback->GroupWordsPerCell = GroupOutputs.GroupWordsPerCell;
 
 			const auto Outputs = FShaderDispatcher::DispatchVisibilityMeshesWithGroups(
 				GraphBuilder,
-				CellsData,
-				MeshesData,
+				CellBoxesData,
+				MeshBoxesData,
 				MeshToGroupData,
 				GroupOutputs.GroupVisibilityWords,
 				GroupOutputs.NumGroups,
 				GroupOutputs.GroupWordsPerCell,
 				NodesData,
 				LeafTrisData,
-				OccVerticesCopy,
-				OccIndicesCopy,
+				OccluderVerticesCopy,
+				OccluderIndicesCopy,
 				NumCellSamples,
 				MinMeshSamples,
 				MaxMeshSamples,
@@ -918,7 +924,7 @@ void FGPUPVS::ComputeVisibility()
 						WordsReadback->EnqueueCopy(RHICmdList, WordsBuffer->GetRHI(), 0u);
 					});
 
-				ReadbackState->WordsReadback = WordsReadback;
+				Readback->WordsReadback = WordsReadback;
 			}
 
 			if (Outputs.Stats)
@@ -932,7 +938,7 @@ void FGPUPVS::ComputeVisibility()
 					{
 						StatsReadback->EnqueueCopy(RHICmdList, StatsBuffer->GetRHI(), 0u);
 					});
-				ReadbackState->StatsReadback = StatsReadback;
+				Readback->StatsReadback = StatsReadback;
 			}
 
 			if (GroupOutputs.Stats)
@@ -946,7 +952,7 @@ void FGPUPVS::ComputeVisibility()
 					{
 						GroupStatsReadback->EnqueueCopy(RHICmdList, StatsBuffer->GetRHI(), 0u);
 					});
-				ReadbackState->GroupStatsReadback = GroupStatsReadback;
+				Readback->GroupStatsReadback = GroupStatsReadback;
 			}
 
 			GraphBuilder.Execute();
@@ -954,7 +960,7 @@ void FGPUPVS::ComputeVisibility()
 
 	FlushRenderingCommands();
 
-	if (!ReadbackState->WordsReadback || !ReadbackState->StatsReadback || !ReadbackState->GroupStatsReadback)
+	if (!Readback->WordsReadback || !Readback->StatsReadback || !Readback->GroupStatsReadback)
 	{
 		GPUPVS_LOG(Error, TEXT("[Compute] Readback object not created."));
 		Scene.SetVisibilityWords({}, 0, 0);
@@ -962,14 +968,14 @@ void FGPUPVS::ComputeVisibility()
 	}
 
 	const double WaitStart = FPlatformTime::Seconds();
-	while (!ReadbackState->WordsReadback->IsReady() || !ReadbackState->StatsReadback->IsReady() || !ReadbackState->GroupStatsReadback->IsReady())
+	while (!Readback->WordsReadback->IsReady() || !Readback->StatsReadback->IsReady() || !Readback->GroupStatsReadback->IsReady())
 	{
 		FPlatformProcess::Sleep(0.005f);
 		if (FPlatformTime::Seconds() - WaitStart > 60.0)
 		{
-			FRHIGPUBufferReadback* RB = ReadbackState->WordsReadback;
-			FRHIGPUBufferReadback* StatsRB = ReadbackState->StatsReadback;
-			FRHIGPUBufferReadback* GroupStatsRB = ReadbackState->GroupStatsReadback;
+			FRHIGPUBufferReadback* RB = Readback->WordsReadback;
+			FRHIGPUBufferReadback* StatsRB = Readback->StatsReadback;
+			FRHIGPUBufferReadback* GroupStatsRB = Readback->GroupStatsReadback;
 			ENQUEUE_RENDER_COMMAND(GPUPVS_VisibilityTimeoutCleanup)(
 				[RB, StatsRB, GroupStatsRB](FRHICommandListImmediate& RHICmdList)
 				{
@@ -978,9 +984,9 @@ void FGPUPVS::ComputeVisibility()
 					delete GroupStatsRB;
 				});
 			FlushRenderingCommands();
-			ReadbackState->WordsReadback = nullptr;
-			ReadbackState->StatsReadback = nullptr;
-			ReadbackState->GroupStatsReadback = nullptr;
+			Readback->WordsReadback = nullptr;
+			Readback->StatsReadback = nullptr;
+			Readback->GroupStatsReadback = nullptr;
 			GPUPVS_LOG(Error, TEXT("[Compute] GPU readback timeout (>60s)."));
 			Scene.SetVisibilityWords({}, 0, 0);
 			return;
@@ -988,49 +994,49 @@ void FGPUPVS::ComputeVisibility()
 	}
 
 	TArray<uint32> WordsCPU;
-	WordsCPU.SetNumUninitialized((int32)ReadbackState->TotalWords);
-	const uint64 Bytes64 = uint64(ReadbackState->TotalWords) * sizeof(uint32);
+	WordsCPU.SetNumUninitialized((int32)Readback->TotalWords);
+	const uint64 Bytes64 = uint64(Readback->TotalWords) * sizeof(uint32);
 	const uint32 Bytes = (Bytes64 > MAX_uint32) ? 0u : (uint32)Bytes64;
 	if (Bytes == 0u)
 	{
-		FRHIGPUBufferReadback* RB = ReadbackState->WordsReadback;
+		FRHIGPUBufferReadback* RB = Readback->WordsReadback;
 		ENQUEUE_RENDER_COMMAND(GPUPVS_VisibilityTooLargeCleanup)(
 			[RB](FRHICommandListImmediate& RHICmdList)
 			{
 				delete RB;
 			});
 		FlushRenderingCommands();
-		ReadbackState->WordsReadback = nullptr;
-		GPUPVS_LOG(Error, TEXT("[Compute] Readback size too large. TotalWords=%u"), ReadbackState->TotalWords);
+		Readback->WordsReadback = nullptr;
+		GPUPVS_LOG(Error, TEXT("[Compute] Readback size too large. TotalWords=%u"), Readback->TotalWords);
 		Scene.SetVisibilityWords({}, 0, 0);
 		return;
 	}
 
-	FRHIGPUBufferReadback* RB = ReadbackState->WordsReadback;
-	FRHIGPUBufferReadback* StatsRB = ReadbackState->StatsReadback;
-	FRHIGPUBufferReadback* GroupStatsRB = ReadbackState->GroupStatsReadback;
-	TArray<uint32> GPUStats;
-	GPUStats.SetNumZeroed(8);
-	TArray<uint32> GroupGPUStats;
-	GroupGPUStats.SetNumZeroed(8);
+	FRHIGPUBufferReadback* RB = Readback->WordsReadback;
+	FRHIGPUBufferReadback* StatsRB = Readback->StatsReadback;
+	FRHIGPUBufferReadback* GroupStatsRB = Readback->GroupStatsReadback;
+	TArray<uint32> MeshPassStats;
+	MeshPassStats.SetNumZeroed(8);
+	TArray<uint32> GroupPassStats;
+	GroupPassStats.SetNumZeroed(8);
 	ENQUEUE_RENDER_COMMAND(GPUPVS_CopyVisibilityReadback)(
-		[RB, StatsRB, GroupStatsRB, Bytes, &WordsCPU, &GPUStats, &GroupGPUStats](FRHICommandListImmediate& RHICmdList)
+		[RB, StatsRB, GroupStatsRB, Bytes, &WordsCPU, &MeshPassStats, &GroupPassStats](FRHICommandListImmediate& RHICmdList)
 		{
 			if (void* Ptr = RB->Lock(Bytes))
 			{
 				FMemory::Memcpy(WordsCPU.GetData(), Ptr, Bytes);
 				RB->Unlock();
 			}
-			const uint32 StatsBytes = (uint32)(GPUStats.Num() * sizeof(uint32));
+			const uint32 StatsBytes = (uint32)(MeshPassStats.Num() * sizeof(uint32));
 			if (void* StatsPtr = StatsRB->Lock(StatsBytes))
 			{
-				FMemory::Memcpy(GPUStats.GetData(), StatsPtr, StatsBytes);
+				FMemory::Memcpy(MeshPassStats.GetData(), StatsPtr, StatsBytes);
 				StatsRB->Unlock();
 			}
-			const uint32 GroupStatsBytes = (uint32)(GroupGPUStats.Num() * sizeof(uint32));
+			const uint32 GroupStatsBytes = (uint32)(GroupPassStats.Num() * sizeof(uint32));
 			if (void* GroupStatsPtr = GroupStatsRB->Lock(GroupStatsBytes))
 			{
-				FMemory::Memcpy(GroupGPUStats.GetData(), GroupStatsPtr, GroupStatsBytes);
+				FMemory::Memcpy(GroupPassStats.GetData(), GroupStatsPtr, GroupStatsBytes);
 				GroupStatsRB->Unlock();
 			}
 			delete RB;
@@ -1039,9 +1045,9 @@ void FGPUPVS::ComputeVisibility()
 		});
 
 	FlushRenderingCommands();
-	ReadbackState->WordsReadback = nullptr;
-	ReadbackState->StatsReadback = nullptr;
-	ReadbackState->GroupStatsReadback = nullptr;
+	Readback->WordsReadback = nullptr;
+	Readback->StatsReadback = nullptr;
+	Readback->GroupStatsReadback = nullptr;
 
 	uint32 NonZeroWords = 0;
 	uint32 CellsWithAnyVisible = 0;
@@ -1050,11 +1056,11 @@ void FGPUPVS::ComputeVisibility()
 	uint64 TotalVisibleMeshes = 0;
 	int32 FirstNonZeroCell = INDEX_NONE;
 
-	for (int32 CellIndex = 0; CellIndex < Cells.Num(); ++CellIndex)
+	for (int32 CellIndex = 0; CellIndex < CellList.Num(); ++CellIndex)
 	{
-		const uint32 BaseWord = (uint32)CellIndex * ReadbackState->WordsPerCell;
+		const uint32 BaseWord = (uint32)CellIndex * Readback->WordsPerCell;
 		uint32 VisibleInCell = 0;
-		for (uint32 WordIndex = 0; WordIndex < ReadbackState->WordsPerCell; ++WordIndex)
+		for (uint32 WordIndex = 0; WordIndex < Readback->WordsPerCell; ++WordIndex)
 		{
 			const uint32 W = WordsCPU[(int32)(BaseWord + WordIndex)];
 			if (W != 0)
@@ -1078,7 +1084,7 @@ void FGPUPVS::ComputeVisibility()
 		TotalVisibleMeshes += (uint64)VisibleInCell;
 	}
 
-	if (Cells.IsEmpty())
+	if (CellList.IsEmpty())
 	{
 		MinVisibleMeshes = 0;
 	}
@@ -1089,49 +1095,49 @@ void FGPUPVS::ComputeVisibility()
 
 	if (FirstNonZeroCell != INDEX_NONE)
 	{
-		const uint32 BaseWord = (uint32)FirstNonZeroCell * ReadbackState->WordsPerCell;
+		const uint32 BaseWord = (uint32)FirstNonZeroCell * Readback->WordsPerCell;
 		const uint32 W0 = WordsCPU[(int32)(BaseWord + 0)];
-		const uint32 W1 = ReadbackState->WordsPerCell > 1 ? WordsCPU[(int32)(BaseWord + 1)] : 0u;
-		const uint32 W2 = ReadbackState->WordsPerCell > 2 ? WordsCPU[(int32)(BaseWord + 2)] : 0u;
-		const uint32 W3 = ReadbackState->WordsPerCell > 3 ? WordsCPU[(int32)(BaseWord + 3)] : 0u;
+		const uint32 W1 = Readback->WordsPerCell > 1 ? WordsCPU[(int32)(BaseWord + 1)] : 0u;
+		const uint32 W2 = Readback->WordsPerCell > 2 ? WordsCPU[(int32)(BaseWord + 2)] : 0u;
+		const uint32 W3 = Readback->WordsPerCell > 3 ? WordsCPU[(int32)(BaseWord + 3)] : 0u;
 		GPUPVS_LOG(Verbose, TEXT("[Compute] FirstNonZero Cell=%d Words[0..3]=0x%08X 0x%08X 0x%08X 0x%08X"),
 			FirstNonZeroCell,
 			W0, W1, W2, W3);
 	}
 
-	Scene.SetVisibilityWords(MoveTemp(WordsCPU), ReadbackState->NumMeshes, ReadbackState->WordsPerCell);
+	Scene.SetVisibilityWords(MoveTemp(WordsCPU), Readback->NumMeshes, Readback->WordsPerCell);
 
 	const double BuildEndTime = FPlatformTime::Seconds();
 	GPUPVS_LOG(Log, TEXT("[Compute] BVHNodes=%d BVHLeafTris=%d Cells=%d Meshes=%u Groups=%u WordsPerCell=%u TotalWords=%u Time=%.3fs"),
 		BVHNodesCount,
 		BVHLeafTriCount,
-		Cells.Num(),
-		ReadbackState->NumMeshes,
-		ReadbackState->NumGroups,
-		ReadbackState->WordsPerCell,
-		ReadbackState->TotalWords,
+		CellList.Num(),
+		Readback->NumMeshes,
+		Readback->NumGroups,
+		Readback->WordsPerCell,
+		Readback->TotalWords,
 		BuildEndTime - BuildStartTime);
 
-	const double AvgVisibleMeshes = Cells.Num() > 0 ? (double)TotalVisibleMeshes / (double)Cells.Num() : 0.0;
+	const double AvgVisibleMeshes = CellList.Num() > 0 ? (double)TotalVisibleMeshes / (double)CellList.Num() : 0.0;
 	GPUPVS_LOG(Log, TEXT("[Compute] VisibleStats CellsWithAny=%u/%d MinVisible=%u MaxVisible=%u AvgVisible=%.2f NonZeroWords=%u/%u"),
 		CellsWithAnyVisible,
-		Cells.Num(),
+		CellList.Num(),
 		MinVisibleMeshes,
 		MaxVisibleMeshes,
 		AvgVisibleMeshes,
 		NonZeroWords,
-		ReadbackState->TotalWords);
+		Readback->TotalWords);
 
-	if (GPUStats.Num() == 8)
+	if (MeshPassStats.Num() == 8)
 	{
-		const uint32 Pairs = GPUStats[0];
-		const uint32 VisiblePairs = GPUStats[1];
-		const uint32 DistanceCulled = GPUStats[2];
-		const uint32 SizeRatioVisible = GPUStats[3];
-		const uint32 GroupSkipped = GPUStats[4];
-		const uint32 VisibleExplicit = GPUStats[5];
-		const uint32 VisibleImportance = GPUStats[6];
-		const uint32 Rays = GPUStats[7];
+		const uint32 Pairs = MeshPassStats[0];
+		const uint32 VisiblePairs = MeshPassStats[1];
+		const uint32 DistanceCulled = MeshPassStats[2];
+		const uint32 SizeRatioVisible = MeshPassStats[3];
+		const uint32 GroupSkipped = MeshPassStats[4];
+		const uint32 VisibleExplicit = MeshPassStats[5];
+		const uint32 VisibleImportance = MeshPassStats[6];
+		const uint32 Rays = MeshPassStats[7];
 		const double AvgRaysPerPair = Pairs > 0 ? (double)Rays / (double)Pairs : 0.0;
 		GPUPVS_LOG(Log, TEXT("[Compute] GPUStats(Mesh) Pairs=%u VisiblePairs=%u DistanceCulled=%u SizeRatioVisible=%u GroupSkipped=%u VisibleExplicit=%u VisibleImportance=%u Rays=%u AvgRaysPerPair=%.2f"),
 			Pairs,
@@ -1145,13 +1151,13 @@ void FGPUPVS::ComputeVisibility()
 			AvgRaysPerPair);
 	}
 
-	if (GroupGPUStats.Num() == 8)
+	if (GroupPassStats.Num() == 8)
 	{
-		const uint32 Pairs = GroupGPUStats[0];
-		const uint32 VisiblePairs = GroupGPUStats[1];
-		const uint32 DistanceCulled = GroupGPUStats[2];
-		const uint32 SizeRatioVisible = GroupGPUStats[3];
-		const uint32 Rays = GroupGPUStats[7];
+		const uint32 Pairs = GroupPassStats[0];
+		const uint32 VisiblePairs = GroupPassStats[1];
+		const uint32 DistanceCulled = GroupPassStats[2];
+		const uint32 SizeRatioVisible = GroupPassStats[3];
+		const uint32 Rays = GroupPassStats[7];
 		const double AvgRaysPerPair = Pairs > 0 ? (double)Rays / (double)Pairs : 0.0;
 		GPUPVS_LOG(Log, TEXT("[Compute] GPUStats(Group) Pairs=%u VisiblePairs=%u DistanceCulled=%u SizeRatioVisible=%u Rays=%u AvgRaysPerPair=%.2f"),
 			Pairs,
