@@ -1,10 +1,11 @@
 /**
- * GPUPVS ������ʵ�֡�
+ * GPUPVS 主流程实现。
  *
- * ��ǰ�׶�Ŀ�꣺
- * - CollectFromWorld���� UWorld �ռ���̬���񼸺��� PrecomputedVisibilityVolume��
- * - SetupPrecomputedVisibility������/��ȡÿ�� (X,Y) �ĸ߶Ȳ㣬�ٰ� Lightmass ���ù������� 3D Cells��
- * - ComputeVisibility / WriteBack�������ɼ��Լ���������д����ʵ�֣���
+ * 流水线（对齐 Lightmass 的 PrecomputedVisibility）：
+ * - Collect：从 UWorld 收集 PVS Volumes、Setup 几何与遮挡几何
+ * - Setup：GPU 栅格化得到每个 (X,Y) 的高度区间，CPU 生成 3D Cells
+ * - Compute：对每个 Cell 计算可见性 bitset（group→mesh，any-hit 软光追）
+ * - WriteBack：写回资源/关卡数据（未实现）
  */
 #include "GPUPVS.h"
 #include "Engine/World.h"
@@ -25,7 +26,6 @@ FGPUPVS::FGPUPVS(UWorld* InWorld)
 
 FGPUPVS::~FGPUPVS()
 {
-//todo
 }
 
 void FGPUPVS::ResetRasterResults()

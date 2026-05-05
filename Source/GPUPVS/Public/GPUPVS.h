@@ -6,16 +6,13 @@
 class UWorld;
 
 /**
- * GPUPVS ����ࣺ����һ�Ρ�Ԥ����ɼ��ԣ�PVS����������ˮ�ߡ�
+ * GPUPVS 系统：一套“预计算可见性”离线构建流程（对齐 Lightmass 的 PrecomputedVisibility）。
  *
- * ��ˮ�ߣ����� Lightmass �� PrecomputedVisibility �ṹ����
- * - BuildPVS��
- *   - Scene.CollectFromWorld���ռ� PVS Volume �뾲̬���Σ�����ռ������Σ���
- *   - SetupPrecomputedVisibility��
- *     - GPU դ�񻯣�����ÿ�� (X,Y) �ĸ߶Ȳ㣨LayerCount + HeightRanges����
- *     - CPU ���ã����� Lightmass ���򣬽��߶Ȳ�ת���� 3D Cells�����ں����ɼ��Բ�������
- *   - ComputeVisibility����ÿ�� Cell ����ɼ� Mesh ������ʵ�֣���
- *   - WriteBack��д���ʲ�������������ʵ�֣���
+ * BuildPVS 流程：
+ * - Collect：收集 PVS Volumes、Setup 几何与遮挡几何
+ * - Setup：GPU 栅格化高度区间，CPU 生成 3D Cells
+ * - Compute：计算每个 Cell 的可见性 bitset（group→mesh）
+ * - WriteBack：写回资源/关卡数据（未实现）
  */
 class GPUPVS_API FGPUPVS
 {
@@ -40,10 +37,11 @@ public:
     FGPUPVS(UWorld* InWorld);
     ~FGPUPVS();
 
-	/** ����һ������������ͨ����������/�༭����ť���á� */
+	/** 执行一次完整构建（主要用于调试/迭代）。 */
     void BuildPVS();
 	const TArray<FPVSCell>& GetCells() const { return Scene.GetCells(); }
 	void SetParams(const FParams& InParams);
+	/** 打印当前缓存数据概览（cells/meshes/groups/bitset）。 */
 	void DumpSummary() const;
 
 private:
@@ -53,9 +51,9 @@ private:
 	FParams Params;
 
 	/**
-	 * Setup �׶ε�դ�������CPU �˻��棩��
-	 * - RasterLayerCount��ÿ�����صĲ���
-	 * - RasterHeightRanges��ÿ������ÿ��� (ZMin,ZMax)������Ϊ [PixelIndex * RasterMaxLayers + LayerIndex]
+	 * Setup 阶段栅格化结果（CPU 侧缓存）。
+	 * - RasterLayerCount：每个像素的层数
+	 * - RasterHeightRanges：每个像素每层的 (ZMin,ZMax)，索引为 [PixelIndex * RasterMaxLayers + LayerIndex]
 	 */
     uint32 RasterGridSizeX;
     uint32 RasterGridSizeY;
@@ -65,7 +63,7 @@ private:
     TArray<uint32> RasterLayerCount;
     TArray<FVector2f> RasterHeightRanges;
 
-    /** PVS ��������ǰ��Ӳ���룬�����ɽ��빤�����û����̨�������� */
+    /** 当前构建参数（插件内硬编码 + 面板可覆盖）。 */
     int32 RasterMaxLayersLimit;
     int32 VisibilityRayCount;
     float VisibilityMaxDistance;
@@ -82,10 +80,10 @@ private:
 	void ResetRasterResults();
     void InitDefaultParams();
 
-	/** Setup������/��ȡ�߶Ȳ㣬������ Cells�� */
+	/** Setup：计算/读取高度区间，并生成 Cells。 */
 	void SetupPrecomputedVisibility();
-	/** Compute����ÿ�� Cell ����ɼ��ԡ� */
+	/** Compute：计算每个 Cell 的可见性。 */
 	void ComputeVisibility();
-	/** Write�������д�ص��ؿ����ʲ��� */
+	/** Write：写回资源/关卡数据（未实现）。 */
 	void WriteBack();
 };

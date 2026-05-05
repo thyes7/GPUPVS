@@ -7,12 +7,15 @@
 #include "ShaderParameterStruct.h"
 #include "RenderGraphBuilder.h"
 
-// ǰ������
+// 前向声明
 class FShaderDispatcher;
 
 // ========================================
-// �򵥼�����ɫ��
+// 简单 Compute Shader
 // ========================================
+/**
+ * 最小样例：用于验证 RDG + Compute 的调度链路是否正常。
+ */
 class FSimpleCS : public FGlobalShader
 {
 public:
@@ -52,12 +55,22 @@ public:
     END_SHADER_PARAMETER_STRUCT()
 };
 
+/**
+ * GPU 侧用到的 AABB（float3 min/max）。
+ * 用 StructuredBuffer 传输，避免 FBox3f 的布局差异。
+ */
 struct FGPUPVSBox3f
 {
 	FVector3f Min = FVector3f::ZeroVector;
 	FVector3f Max = FVector3f::ZeroVector;
 };
 
+/**
+ * BVH 节点（GPU 侧布局，必须与 USF 里结构体字段顺序一致）。
+ * - RightChildOrTriCount 最高位为 Leaf 标记
+ * - 叶子：LeftChildOrFirstTri=FirstTri，RightChildOrTriCount=(LeafBit | TriCount)
+ * - 内部节点：LeftChildOrFirstTri=LeftChild，RightChildOrTriCount=RightChild
+ */
 struct FGPUPVSBVHNodeGPU
 {
 	FVector3f BoundsMin = FVector3f::ZeroVector;
@@ -66,6 +79,10 @@ struct FGPUPVSBVHNodeGPU
 	uint32 RightChildOrTriCount = 0;
 };
 
+/**
+ * Group 可见性查询（对齐 Lightmass 的 group→mesh 两阶段）。
+ * 输出每个 Cell 的 group bitset，用于 mesh pass 的快速跳过。
+ */
 class FVisibilityGroupCS : public FGlobalShader
 {
 public:
@@ -180,12 +197,16 @@ public:
 };
 
 // ========================================
-// ��ɫ��������
+// Shader 调度入口
 // ========================================
+/**
+ * 统一封装 RDG Buffer 创建、参数绑定与 Dispatch。
+ * 约定：所有输出 buffer 都是 RDG buffer，需要由调用侧决定是否做 readback。
+ */
 class FShaderDispatcher
 {
 public:
-    // ���ȼ���ɫ��
+	/** 最小样例调度（不做 readback）。 */
     static void DispatchSimpleCS(FRDGBuilder& GraphBuilder, uint32 IntA, uint32 IntB);
 
     struct FRasterAABBOutputs
@@ -195,15 +216,15 @@ public:
     };
 
 	/**
-	 * ����������դ�񻯵� (X,Y) �������ÿ���صĸ߶Ȳ���Ϣ��
+	 * Setup：将三角形栅格化到 (X,Y) 网格，输出每个像素的高度区间（多层）。
 	 *
-	 * Լ����
-	 * - LayerCount��ÿ������Ч����
-	 * - HeightRanges��ÿ�� (ZMin,ZMax)������Ϊ [PixelIndex * MaxLayers + LayerIndex]
+	 * 输出：
+	 * - LayerCount：每个像素的有效层数
+	 * - HeightRanges：每像素每层的 (ZMin,ZMax)，索引为 [PixelIndex * MaxLayers + LayerIndex]
 	 *
-	 * ˵����
-	 * - ��ǰʵ��Ϊ���ؽ��ƣ�RasterAABB������������ͨ Setup ���̣�
-	 * - ����������� Lightmass�����滻Ϊ�����ξ�ȷդ�����Ӳ�����
+	 * 说明：
+	 * - 当前实现采用三角形 AABB 覆盖范围内的 9 点采样（对齐 Lightmass 的 supersample + edge pullback）
+	 * - MaxLayers 是硬上限，超过会被截断并在 CPU 侧统计
 	 */
     static FRasterAABBOutputs DispatchRasterAABB(
         FRDGBuilder& GraphBuilder,
@@ -223,6 +244,10 @@ public:
 		uint32 WordsPerCell = 0;
 	};
 
+	/**
+	 * Mesh 可见性（单阶段版本，主要用于对比/回归）。
+	 * 输出为每个 Cell 一份 mesh bitset（uint32 words）。
+	 */
 	static FVisibilityOutputs DispatchVisibility(
 		FRDGBuilder& GraphBuilder,
 		TConstArrayView<FGPUPVSBox3f> Cells,
@@ -246,6 +271,7 @@ public:
 		uint32 GroupWordsPerCell = 0;
 	};
 
+	/** Group 可见性 pass（输出 group bitset）。 */
 	static FVisibilityGroupOutputs DispatchVisibilityGroups(
 		FRDGBuilder& GraphBuilder,
 		TConstArrayView<FGPUPVSBox3f> Cells,
@@ -261,6 +287,10 @@ public:
 		float MeshBoundsScale,
 		float MaxDistance);
 
+	/**
+	 * Mesh 可见性 pass（依赖 group bitset 做快速跳过）。
+	 * - MeshToGroup=0xFFFFFFFF 表示不入组，直接做 mesh query（对齐 Lightmass 行为）
+	 */
 	static FVisibilityOutputs DispatchVisibilityMeshesWithGroups(
 		FRDGBuilder& GraphBuilder,
 		TConstArrayView<FGPUPVSBox3f> Cells,
