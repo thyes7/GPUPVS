@@ -9,14 +9,22 @@
 #include "GPUPVSEditorModule.h"
 #include "GPUPVSCommands.h"
 #include "GPUPVSModule.h"
+#include "GPUPVS.h"
 
 #include "Misc/MessageDialog.h"
 #include "ToolMenus.h"
 
 #if WITH_EDITOR
 #include "Editor.h"
+#include "DrawDebugHelpers.h"
 #include "Engine/World.h"
 #endif
+
+static TAutoConsoleVariable<int32> CVarGPUPVSDrawCells(
+	TEXT("gpupvs.DrawCells"),
+	0,
+	TEXT("Draw GPUPVS cells as wire boxes in editor viewport.\n0: Off\n1: On"),
+	ECVF_Default);
 
 #define LOCTEXT_NAMESPACE "GPUPVSEditor"
 
@@ -39,6 +47,8 @@ void FGPUPVSEditorModule::StartupModule()
 		FCanExecuteAction());
 
 	UToolMenus::RegisterStartupCallback(FSimpleMulticastDelegate::FDelegate::CreateRaw(this, &FGPUPVSEditorModule::RegisterMenus));
+
+	TickHandle = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateRaw(this, &FGPUPVSEditorModule::Tick), 0.0f);
 }
 
 void FGPUPVSEditorModule::ShutdownModule()
@@ -49,6 +59,12 @@ void FGPUPVSEditorModule::ShutdownModule()
 	UToolMenus::UnRegisterStartupCallback(this);
 
 	UToolMenus::UnregisterOwner(this);
+
+	if (TickHandle.IsValid())
+	{
+		FTSTicker::RemoveTicker(TickHandle);
+		TickHandle.Reset();
+	}
 
 	FGPUPVSCommands::Unregister();
 }
@@ -96,6 +112,48 @@ void FGPUPVSEditorModule::RegisterMenus()
 			Section.AddMenuEntryWithCommandList(FGPUPVSCommands::Get().PluginAction2, PluginCommands);
 		}
 	}
+}
+
+bool FGPUPVSEditorModule::Tick(float DeltaSeconds)
+{
+#if WITH_EDITOR
+	if (CVarGPUPVSDrawCells.GetValueOnGameThread() == 0)
+	{
+		return true;
+	}
+
+	if (!GEditor)
+	{
+		return true;
+	}
+
+	UWorld* World = GEditor->GetEditorWorldContext().World();
+	if (!World)
+	{
+		return true;
+	}
+
+	FGPUPVS* System = FGPUPVSModule::Get().FindPVSForWorld(World);
+	if (!System)
+	{
+		return true;
+	}
+
+	const TArray<FPVSCell>& Cells = System->GetCells();
+	if (Cells.IsEmpty())
+	{
+		return true;
+	}
+
+	const FColor Color(0, 255, 255);
+	for (const FPVSCell& Cell : Cells)
+	{
+		const FVector Center = (FVector)Cell.Bounds.GetCenter();
+		const FVector Extent = (FVector)Cell.Bounds.GetExtent();
+		DrawDebugBox(World, Center, Extent, Color, false, 0.0f, 0, 1.0f);
+	}
+#endif
+	return true;
 }
 
 #undef LOCTEXT_NAMESPACE

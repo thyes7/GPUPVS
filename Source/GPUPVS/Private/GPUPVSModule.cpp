@@ -52,6 +52,12 @@ FGPUPVS* FGPUPVSModule::GetOrCreatePVSForWorld(UWorld* InWorld)
 	else return *WorldToPVSMap.Find(InWorld);
 }
 
+FGPUPVS* FGPUPVSModule::FindPVSForWorld(UWorld* InWorld) const
+{
+	FGPUPVS* const* Found = WorldToPVSMap.Find(InWorld);
+	return Found ? *Found : nullptr;
+}
+
 // 运行中删除PVS实例用
 void FGPUPVSModule::DestroyPVSForWorld(UWorld* InWorld)
 {

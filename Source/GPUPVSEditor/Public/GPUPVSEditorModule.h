@@ -3,6 +3,7 @@
 #pragma once
 
 #include "Modules/ModuleManager.h"
+#include "Containers/Ticker.h"
 
 class FToolBarBuilder;
 class FMenuBuilder;
@@ -27,8 +28,10 @@ public:
 private:
 
 	void RegisterMenus();
+	bool Tick(float DeltaSeconds);
 
 
 private:
 	TSharedPtr<class FUICommandList> PluginCommands;
+	FTSTicker::FDelegateHandle TickHandle;
 };

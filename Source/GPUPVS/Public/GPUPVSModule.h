@@ -15,7 +15,7 @@ class UWorld;
  * - 注册插件 Shader 目录映射（/Plugin/GPUPVS）。
  * - 为每个 UWorld 管理一个 FGPUPVS 实例（便于编辑器/命令行触发构建）。
  */
-class FGPUPVSModule : public IModuleInterface
+class GPUPVS_API FGPUPVSModule : public IModuleInterface
 {
 public:
 	static inline FGPUPVSModule& Get() 
@@ -27,6 +27,7 @@ public:
 	virtual void ShutdownModule() override;
 
 	FGPUPVS* GetOrCreatePVSForWorld(UWorld* World);
+	FGPUPVS* FindPVSForWorld(UWorld* World) const;
 	void DestroyPVSForWorld(UWorld* World);
 
 private:

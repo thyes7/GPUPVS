@@ -25,6 +25,7 @@ public:
 
 	/** ����һ������������ͨ����������/�༭����ť���á� */
     void BuildPVS();
+	const TArray<FPVSCell>& GetCells() const { return Scene.GetCells(); }
 
 private:
     UWorld* World;
