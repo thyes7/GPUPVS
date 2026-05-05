@@ -17,19 +17,40 @@ class UWorld;
  *   - ComputeVisibility����ÿ�� Cell ����ɼ� Mesh ������ʵ�֣���
  *   - WriteBack��д���ʲ�������������ʵ�֣���
  */
-class FGPUPVS
+class GPUPVS_API FGPUPVS
 {
 public:
+	struct FParams
+	{
+		float CellSize = 200.0f;
+		float PlayAreaHeight = 220.0f;
+		bool bPlaceCellsOnOpaqueOnly = true;
+
+		int32 RasterMaxLayersLimit = 64;
+
+		float VisibilityMaxDistance = 5000.0f;
+		float VisibilityMeshBoundsScale = 1.2f;
+		int32 VisibilityNumCellSamples = 24;
+		int32 VisibilityMinMeshSamples = 14;
+		int32 VisibilityMaxMeshSamples = 40;
+		int32 VisibilityNumImportanceSamples = 40;
+		int32 VisibilityBVHLeafTriLimit = 4;
+	};
+
     FGPUPVS(UWorld* InWorld);
     ~FGPUPVS();
 
 	/** ����һ������������ͨ����������/�༭����ť���á� */
     void BuildPVS();
 	const TArray<FPVSCell>& GetCells() const { return Scene.GetCells(); }
+	void SetParams(const FParams& InParams);
+	void DumpSummary() const;
 
 private:
     UWorld* World;
     FPVSScene Scene;
+
+	FParams Params;
 
 	/**
 	 * Setup �׶ε�դ�������CPU �˻��棩��
@@ -54,6 +75,9 @@ private:
 	int32 VisibilityNumImportanceSamples;
 	float VisibilityMeshBoundsScale;
 	int32 VisibilityBVHLeafTriLimit;
+
+	mutable int32 LastGroupsBuilt = 0;
+	mutable int32 LastMappedMeshes = 0;
 
 	void ResetRasterResults();
     void InitDefaultParams();

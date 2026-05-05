@@ -41,22 +41,31 @@ void FGPUPVS::ResetRasterResults()
 
 void FGPUPVS::InitDefaultParams()
 {
-	RasterMaxLayersLimit = 64;
-	VisibilityMaxDistance = 5000.0f;
-	VisibilityNumCellSamples = 24;
-	VisibilityMinMeshSamples = 14;
-	VisibilityMaxMeshSamples = 40;
-	VisibilityNumImportanceSamples = 40;
-	VisibilityMeshBoundsScale = 1.2f;
-	VisibilityBVHLeafTriLimit = 4;
-
-	Scene.SetCellSize(200.0f);
-	Scene.SetPlayAreaHeight(220.0f);
-	Scene.SetPlaceCellsOnOpaqueOnly(true);
-
-	VisibilityRayCount = VisibilityNumCellSamples * VisibilityMaxMeshSamples + VisibilityNumImportanceSamples;
+	Params = FParams();
+	SetParams(Params);
 
 	ResetRasterResults();
+}
+
+void FGPUPVS::SetParams(const FParams& InParams)
+{
+	Params = InParams;
+
+	Scene.SetCellSize(Params.CellSize);
+	Scene.SetPlayAreaHeight(Params.PlayAreaHeight);
+	Scene.SetPlaceCellsOnOpaqueOnly(Params.bPlaceCellsOnOpaqueOnly);
+
+	RasterMaxLayersLimit = Params.RasterMaxLayersLimit;
+
+	VisibilityMaxDistance = Params.VisibilityMaxDistance;
+	VisibilityNumCellSamples = Params.VisibilityNumCellSamples;
+	VisibilityMinMeshSamples = Params.VisibilityMinMeshSamples;
+	VisibilityMaxMeshSamples = Params.VisibilityMaxMeshSamples;
+	VisibilityNumImportanceSamples = Params.VisibilityNumImportanceSamples;
+	VisibilityMeshBoundsScale = Params.VisibilityMeshBoundsScale;
+	VisibilityBVHLeafTriLimit = Params.VisibilityBVHLeafTriLimit;
+
+	VisibilityRayCount = VisibilityNumCellSamples * VisibilityMaxMeshSamples + VisibilityNumImportanceSamples;
 }
 
 void FGPUPVS::BuildPVS()
@@ -91,6 +100,74 @@ void FGPUPVS::BuildPVS()
 		RasterGridSizeX,
 		RasterGridSizeY,
 		RasterMaxLayers);
+}
+
+void FGPUPVS::DumpSummary() const
+{
+	const int32 CellsCount = Scene.GetCells().Num();
+	const int32 MeshesCount = Scene.GetVisibilityMeshBounds().Num();
+	const int32 OccTriangles = Scene.GetOccluderIndices().Num() / 3;
+	const int32 SetupTriangles = Scene.GetSceneIndices().Num() / 3;
+	const int32 WordsPerCell = (int32)Scene.GetVisibilityWordsPerCell();
+	const int32 TotalWords = Scene.GetVisibilityWords().Num();
+
+	GPUPVS_LOG(Log, TEXT("[Summary] Cells=%d Meshes=%d Groups=%d MappedMeshes=%d SetupTriangles=%d OccluderTriangles=%d WordsPerCell=%d TotalWords=%d"),
+		CellsCount,
+		MeshesCount,
+		LastGroupsBuilt,
+		LastMappedMeshes,
+		SetupTriangles,
+		OccTriangles,
+		WordsPerCell,
+		TotalWords);
+
+	if (CellsCount <= 0 || MeshesCount <= 0 || WordsPerCell <= 0 || TotalWords <= 0)
+	{
+		return;
+	}
+
+	const TArray<uint32>& Words = Scene.GetVisibilityWords();
+	const uint32 NumMeshes = (uint32)MeshesCount;
+
+	uint32 CellsWithAnyVisible = 0;
+	uint32 MinVisibleMeshes = MAX_uint32;
+	uint32 MaxVisibleMeshes = 0;
+	uint64 TotalVisibleMeshes = 0;
+
+	for (int32 CellIndex = 0; CellIndex < CellsCount; ++CellIndex)
+	{
+		const int32 Base = CellIndex * WordsPerCell;
+		uint32 VisibleInCell = 0;
+		for (int32 WordIndex = 0; WordIndex < WordsPerCell; ++WordIndex)
+		{
+			const uint32 W = Words[Base + WordIndex];
+			if (W != 0)
+			{
+				VisibleInCell += (uint32)FPlatformMath::CountBits(W);
+			}
+		}
+		if (VisibleInCell > 0)
+		{
+			CellsWithAnyVisible++;
+		}
+		MinVisibleMeshes = FMath::Min(MinVisibleMeshes, VisibleInCell);
+		MaxVisibleMeshes = FMath::Max(MaxVisibleMeshes, VisibleInCell);
+		TotalVisibleMeshes += (uint64)VisibleInCell;
+	}
+
+	if (MinVisibleMeshes == MAX_uint32)
+	{
+		MinVisibleMeshes = 0;
+	}
+
+	const double AvgVisible = CellsCount > 0 ? (double)TotalVisibleMeshes / (double)CellsCount : 0.0;
+	GPUPVS_LOG(Log, TEXT("[Summary] VisibleStats CellsWithAny=%u/%d MinVisible=%u MaxVisible=%u AvgVisible=%.2f (Meshes=%u)"),
+		CellsWithAnyVisible,
+		CellsCount,
+		MinVisibleMeshes,
+		MaxVisibleMeshes,
+		AvgVisible,
+		NumMeshes);
 }
 
 void FGPUPVS::SetupPrecomputedVisibility()
@@ -732,6 +809,8 @@ void FGPUPVS::ComputeVisibility()
 			NumMappedMeshes++;
 		}
 	}
+	LastGroupsBuilt = GroupsCPU.Num();
+	LastMappedMeshes = NumMappedMeshes;
 	GPUPVS_LOG(Log, TEXT("[Compute] GroupsBuilt=%d Meshes=%d MappedMeshes=%d"),
 		GroupsCPU.Num(),
 		MeshBounds.Num(),

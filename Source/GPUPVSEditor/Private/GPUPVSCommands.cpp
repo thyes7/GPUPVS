@@ -13,8 +13,8 @@
 
 void FGPUPVSCommands::RegisterCommands()
 {
-	UI_COMMAND(PluginAction1, "GPUPVS1", "Execute GPUPVS action1", EUserInterfaceActionType::Button, FInputChord());
-	UI_COMMAND(PluginAction2, "GPUPVS2", "Execute GPUPVS action2", EUserInterfaceActionType::Button, FInputChord());
+	UI_COMMAND(PluginAction1, "GPUPVS", "Open GPUPVS panel", EUserInterfaceActionType::Button, FInputChord());
+	UI_COMMAND(PluginAction2, "Build PVS", "Build PVS once", EUserInterfaceActionType::Button, FInputChord());
 }
 
 #undef LOCTEXT_NAMESPACE

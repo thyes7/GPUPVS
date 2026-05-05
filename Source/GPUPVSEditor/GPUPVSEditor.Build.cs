@@ -34,6 +34,8 @@ public class GPUPVSEditor : ModuleRules
 				"EditorStyle",
 				"ToolMenus",
 				"ToolWidgets",
+				"PropertyEditor",
+				"LevelEditor",
 				// ... add private dependencies that you statically link with here ...	
 			}
 		);

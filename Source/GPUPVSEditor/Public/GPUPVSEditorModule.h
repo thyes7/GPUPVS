@@ -7,6 +7,8 @@
 
 class FToolBarBuilder;
 class FMenuBuilder;
+class UGPUPVSEditorSettings;
+class IDetailsView;
 
 /**
  * GPUPVS 编辑器模块接口。
@@ -29,9 +31,15 @@ private:
 
 	void RegisterMenus();
 	bool Tick(float DeltaSeconds);
+	void OpenPanel();
+	TSharedRef<class SDockTab> SpawnPanelTab(const class FSpawnTabArgs& Args);
+	void ApplySettingsToSystem(class FGPUPVS& System);
 
 
 private:
 	TSharedPtr<class FUICommandList> PluginCommands;
 	FTSTicker::FDelegateHandle TickHandle;
+	TStrongObjectPtr<UGPUPVSEditorSettings> SettingsObject;
+	TSharedPtr<IDetailsView> DetailsView;
+	FName PanelTabName = FName("GPUPVS.Panel");
 };
