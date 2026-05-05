@@ -1,0 +1,129 @@
+#include "/Engine/Public/Platform.ush"
+
+StructuredBuffer<float3> InVertices;
+StructuredBuffer<uint> InIndices;
+uint NumTriangles;
+
+float3 GridOrigin;
+float CellSize;
+uint GridSizeX;
+uint GridSizeY;
+uint MaxLayers;
+
+RWStructuredBuffer<uint> OutLayerCount;
+RWStructuredBuffer<float2> OutHeightRanges;
+
+float EdgeFunction(float2 A, float2 B, float2 C)
+{
+	return (B.x - A.x) * (C.y - A.y) - (B.y - A.y) * (C.x - A.x);
+}
+
+[numthreads(64, 1, 1)]
+void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	uint TriIndex = DispatchThreadId.x;
+	if (TriIndex >= NumTriangles)
+	{
+		return;
+	}
+
+	uint I0 = InIndices[TriIndex * 3 + 0];
+	uint I1 = InIndices[TriIndex * 3 + 1];
+	uint I2 = InIndices[TriIndex * 3 + 2];
+
+	float3 V0 = InVertices[I0];
+	float3 V1 = InVertices[I1];
+	float3 V2 = InVertices[I2];
+
+	float3 N = cross(V2 - V0, V1 - V0);
+	if (N.z <= 0.0f)
+	{
+		return;
+	}
+
+	float2 P0 = (V0.xy - GridOrigin.xy) / CellSize;
+	float2 P1 = (V1.xy - GridOrigin.xy) / CellSize;
+	float2 P2 = (V2.xy - GridOrigin.xy) / CellSize;
+
+	float MinXf = min(P0.x, min(P1.x, P2.x));
+	float MinYf = min(P0.y, min(P1.y, P2.y));
+	float MaxXf = max(P0.x, max(P1.x, P2.x));
+	float MaxYf = max(P0.y, max(P1.y, P2.y));
+
+	int MinX = max(0, (int)floor(MinXf));
+	int MinY = max(0, (int)floor(MinYf));
+	int MaxX = min((int)GridSizeX - 1, (int)ceil(MaxXf));
+	int MaxY = min((int)GridSizeY - 1, (int)ceil(MaxYf));
+
+	float Area = EdgeFunction(P0, P1, P2);
+	if (abs(Area) < 1e-6f)
+	{
+		return;
+	}
+
+	static const float2 SubsamplePositions[9] = {
+		float2(0.5f, 0.5f),
+		float2(0.0f, 0.5f),
+		float2(0.5f, 0.0f),
+		float2(1.0f, 0.5f),
+		float2(0.5f, 1.0f),
+		float2(1.0f, 1.0f),
+		float2(0.0f, 1.0f),
+		float2(1.0f, 0.0f),
+		float2(0.0f, 0.0f)
+	};
+
+	static const float EdgePullback = 0.1f;
+
+	for (int Y = MinY; Y <= MaxY; ++Y)
+	{
+		for (int X = MinX; X <= MaxX; ++X)
+		{
+			bool bAnyHit = false;
+			float MinZ = 0.0f;
+			float MaxZ = 0.0f;
+
+			for (uint SampleIndex = 0; SampleIndex < 9; ++SampleIndex)
+			{
+				float2 Local = SubsamplePositions[SampleIndex] * (1.0f - 2.0f * EdgePullback) + float2(EdgePullback, EdgePullback);
+				float2 S = float2((float)X, (float)Y) + Local;
+
+				float W0 = EdgeFunction(P1, P2, S);
+				float W1 = EdgeFunction(P2, P0, S);
+				float W2 = EdgeFunction(P0, P1, S);
+
+				if ((W0 * Area >= 0.0f) && (W1 * Area >= 0.0f) && (W2 * Area >= 0.0f))
+				{
+					W0 /= Area;
+					W1 /= Area;
+					W2 /= Area;
+
+					float3 WorldPos = V0 * W0 + V1 * W1 + V2 * W2;
+					if (!bAnyHit)
+					{
+						MinZ = WorldPos.z;
+						MaxZ = WorldPos.z;
+						bAnyHit = true;
+					}
+					else
+					{
+						MinZ = min(MinZ, WorldPos.z);
+						MaxZ = max(MaxZ, WorldPos.z);
+					}
+				}
+			}
+
+			if (bAnyHit)
+			{
+				uint PixelIndex = (uint)Y * GridSizeX + (uint)X;
+				uint LayerIndex = 0;
+				InterlockedAdd(OutLayerCount[PixelIndex], 1, LayerIndex);
+
+				if (LayerIndex < MaxLayers)
+				{
+					OutHeightRanges[PixelIndex * MaxLayers + LayerIndex] = float2(MinZ, MaxZ);
+				}
+			}
+		}
+	}
+}

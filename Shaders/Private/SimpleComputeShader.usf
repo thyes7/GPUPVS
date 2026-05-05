@@ -1,0 +1,15 @@
+#include "/Engine/Public/Platform.ush"
+
+uint IntA;
+uint IntB;
+RWStructuredBuffer<int> OutputBuffer;
+
+[numthreads(THREADS_X, THREADS_Y, 1)]
+void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    // 计算 2 * 3
+    int Result = IntA * IntB;
+    
+    // 将结果写入缓冲区
+    OutputBuffer[0] = Result;
+}
