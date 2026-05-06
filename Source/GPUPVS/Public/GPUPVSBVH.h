@@ -17,7 +17,7 @@ struct FGPUPVSBVHNode
 	static constexpr uint32 LeafBit = 0x80000000u;
 };
 
-/** BVH 构建器：将遮挡三角形构建为一棵二叉树，供 Compute Shader 做 any-hit 相交测试。 */
+// BVH 构建器：遮挡三角形 -> BVH（GPU any-hit 遍历）
 class FGPUPVSBVHBuilder
 {
 public:
@@ -28,4 +28,3 @@ public:
 		TArray<FGPUPVSBVHNode>& OutNodes,
 		TArray<uint32>& OutLeafTriIndices);
 };
-

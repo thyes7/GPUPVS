@@ -9,16 +9,14 @@ class FGPUPVS;
 class UWorld;
 
 /**
- * GPUPVS Runtime 模块。
- *
- * 职责：
- * - 注册插件 Shader 目录映射（/Plugin/GPUPVS）。
- * - 为每个 UWorld 管理一个 FGPUPVS 实例（便于编辑器/命令行触发构建）。
+ * GPUPVS Runtime 模块：
+ * - 注册 Shader 目录映射（/Plugin/GPUPVS）
+ * - 管理每个 UWorld 的 FGPUPVS 实例
  */
 class GPUPVS_API FGPUPVSModule : public IModuleInterface
 {
 public:
-	static inline FGPUPVSModule& Get() 
+	static inline FGPUPVSModule& Get()
 	{
 		return FModuleManager::LoadModuleChecked<FGPUPVSModule>(TEXT("GPUPVS"));
 	}

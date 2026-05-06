@@ -2,6 +2,13 @@
 
 #include "Algo/Sort.h"
 
+/**
+ * BVH 构建（CPU）
+ *
+ * - 离线工具取向：简单稳定优先
+ * - median split（按 centroid 最大轴排序后二分）
+ * - 叶子存 TriIndex，GPU 再映射到 index buffer
+ */
 namespace
 {
 	struct FTriRef

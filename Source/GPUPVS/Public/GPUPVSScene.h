@@ -10,9 +10,8 @@ class FStaticLightingMapping;
 class UWorld;
 
 /**
- * 单个可见性 Cell 的最小描述。
+ * 单个可见性 Cell 的最小描述
  *
- * 约定：
  * - Bounds 的 XY 尺寸为 CellSize
  * - Bounds 的 Z 尺寸为 PlayAreaHeight
  * - Center 用于后续采样点生成（射线/重要性采样等）
@@ -25,7 +24,7 @@ struct FPVSCell
 };
 
 /**
- * 预计算可见性体积：对应关卡内的 APrecomputedVisibilityVolume。
+ * 预计算可见性体积：对应关卡内的 APrecomputedVisibilityVolume
  */
 class FPrecomputedVisibilityVolume
 {
@@ -35,7 +34,7 @@ public:
 };
 
 /**
- * 预计算可见性参数（插件内使用）。
+ * 预计算可见性参数（插件内使用）
  */
 class FGPUPVSVisibilitySettings
 {
@@ -46,7 +45,7 @@ public:
 };
 
 /**
- * 场景快照：只保留 PVS 所需的最小信息，并以“扁平化数组”形式提供给 CPU/GPU 算法。
+ * 场景快照：只保留 PVS 所需的最小信息，并以“扁平化数组”形式提供给 CPU/GPU 算法
  *
  * 当前输出：
  * - PrecomputedVisibilityVolumes：所有 PVS volume bounds
@@ -59,14 +58,14 @@ class FPVSScene
 public:
 	FPVSScene();
 
-	/** 清理所有缓存数据，回到初始状态。 */
+	// 清理缓存
 	void Reset();
-	/** 从 UWorld 采集静态几何与 PVS volume。 */
+	// 采集静态几何与 PVS volumes
 	void CollectFromWorld(UWorld* InWorld);
 
 	/**
-	 * 计算所有 PVS volume 合并后的 Bounds，并在 XY 维度按 CellSize 对齐。
-	 * 该 Bounds 用于构建 (X,Y) 栅格。
+	 * 计算所有 PVS volume 合并后的 Bounds，并在 XY 维度按 CellSize 对齐
+	 * 该 Bounds 用于构建 (X,Y) 栅格
 	 */
 	FBox3f GetAlignedVisibilityVolumeBounds() const;
 	bool DoesBoxIntersectVisibilityVolume(const FBox3f& Box) const;
@@ -81,22 +80,20 @@ public:
 
 	void SetCells(TArray<FPVSCell>&& InCells) { Cells = MoveTemp(InCells); }
 
-	/** 合并后的世界空间顶点数组。 */
+	// 合并后的世界空间网格（StaticMeshComponent LOD0）
 	const TArray<FVector3f>& GetSceneVertices() const { return SceneVertices; }
-	/** 合并后的三角形索引数组（3 个索引为一个三角形）。 */
 	const TArray<uint32>& GetSceneIndices() const { return SceneIndices; }
-	/** 与 SceneVertices 对齐的顶点法线数组。 */
 	const TArray<FVector3f>& GetSceneNormals() const { return SceneNormals; }
-	/** 与三角形对齐的包围盒数组（TriangleBounds.Num() == SceneIndices.Num()/3）。 */
 	const TArray<FBox3f>& GetTriangleBounds() const { return TriangleBounds; }
-	/** PVS Volumes 列表。 */
+
+	// PVS volumes
 	const TArray<FPrecomputedVisibilityVolume>& GetPrecomputedVisibilityVolumes() const { return PrecomputedVisibilityVolumes; }
 
-	/** 遮挡几何（用于光追遮挡，静态不透明）。 */
+	// 遮挡几何（静态不透明）
 	const TArray<FVector3f>& GetOccluderVertices() const { return OccluderVertices; }
 	const TArray<uint32>& GetOccluderIndices() const { return OccluderIndices; }
 
-	/** 可见性目标列表（每个目标一个 Bounds，对应 bitset 的索引）。 */
+	// 可见性目标（Bounds 列表，索引对应 bitset）
 	const TArray<FBox3f>& GetVisibilityMeshBounds() const { return VisibilityMeshBounds; }
 
 	uint32 GetVisibilityNumMeshes() const { return VisibilityNumMeshes; }

@@ -1,11 +1,8 @@
 /**
  * GPUPVS 主流程实现。
  *
- * 流水线（对齐 Lightmass 的 PrecomputedVisibility）：
- * - Collect：从 UWorld 收集 PVS Volumes、Setup 几何与遮挡几何
- * - Setup：GPU 栅格化得到每个 (X,Y) 的高度区间，CPU 生成 3D Cells
- * - Compute：对每个 Cell 计算可见性 bitset（group→mesh，any-hit 软光追）
- * - WriteBack：写回资源/关卡数据（未实现）
+ * 流水线：
+ * - Collect / Setup / Compute / WriteBack
  */
 #include "GPUPVS.h"
 #include "Engine/World.h"
@@ -77,6 +74,7 @@ void FGPUPVS::BuildPVS()
 
 	const double BuildStart = FPlatformTime::Seconds();
 	GPUPVS_LOG(Log, TEXT("[Build] Start World=%s"), *World->GetName());
+	// 打印最终生效参数
 	GPUPVS_LOG(Log, TEXT("[Params] CellSize=%.2f PlayAreaHeight=%.2f PlaceCellsOnOpaqueOnly=%s MeshBoundsScale=%.2f NumCellSamples=%d MinMeshSamples=%d MaxMeshSamples=%d NumImportanceSamples=%d MaxDistance=%.2f"),
 		Scene.GetSettings().CellSize,
 		Scene.GetSettings().PlayAreaHeight,
@@ -276,7 +274,8 @@ void FGPUPVS::SetupPrecomputedVisibility()
 			GraphBuilder.Execute();
 		});
 
-	FlushRenderingCommands();
+	// 等待 GPU 完成
+		FlushRenderingCommands();
 	const double EnqueueEnd = FPlatformTime::Seconds();
 
 	if (!ReadbackState->LayerCountReadback || !ReadbackState->HeightRangesReadback)
@@ -289,6 +288,7 @@ void FGPUPVS::SetupPrecomputedVisibility()
 	while (!ReadbackState->LayerCountReadback->IsReady() || !ReadbackState->HeightRangesReadback->IsReady())
 	{
 		FPlatformProcess::Sleep(0.005f);
+		// 超时保护：避免 GPU hang 卡死
 		if (FPlatformTime::Seconds() - WaitStart > 30.0)
 		{
 			FRHIGPUBufferReadback* LayerRB = ReadbackState->LayerCountReadback;
@@ -391,6 +391,7 @@ void FGPUPVS::SetupPrecomputedVisibility()
 		{
 			for (uint32 X = 0; X < GridSizeX; ++X)
 			{
+				// 多层高度区间 -> 放置多个 cells
 				const uint32 PixelIndex = Y * GridSizeX + X;
 				const uint32 LayerCount = RasterLayerCount[(int32)PixelIndex];
 				const uint32 ClampedLayerCount = FMath::Min(LayerCount, MaxLayers);

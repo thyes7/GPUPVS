@@ -1,10 +1,9 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 /**
- * GPUPVS 编辑器模块。
+ * GPUPVS 编辑器模块
  *
- * 当前阶段作用：
- * - 注册编辑器菜单/按钮（用于快速触发调试入口）。
- * - 后续可逐步把控制台命令、调试 UI、可视化输出收拢到这里。
+ * - 注册菜单/按钮
+ * - 提供调试入口
  */
 #include "GPUPVSEditorModule.h"
 #include "GPUPVSCommands.h"
@@ -46,7 +45,7 @@ IMPLEMENT_MODULE(FGPUPVSEditorModule, GPUPVSEditor)
 
 void FGPUPVSEditorModule::StartupModule()
 {
-	// This code will execute after your module is loaded into memory; the exact timing is specified in the .uplugin file per-module
+	// ToolMenus + Commands 注册菜单项
 	FGPUPVSCommands::Register();
 	
 	PluginCommands = MakeShareable(new FUICommandList);
@@ -62,8 +61,10 @@ void FGPUPVSEditorModule::StartupModule()
 
 	UToolMenus::RegisterStartupCallback(FSimpleMulticastDelegate::FDelegate::CreateRaw(this, &FGPUPVSEditorModule::RegisterMenus));
 
+	// Ticker 做每帧 debug 绘制
 	TickHandle = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateRaw(this, &FGPUPVSEditorModule::Tick), 0.0f);
 
+	// 会话内调参（transient）
 	SettingsObject = TStrongObjectPtr<UGPUPVSEditorSettings>(NewObject<UGPUPVSEditorSettings>(GetTransientPackage()));
 
 	FGlobalTabmanager::Get()->RegisterNomadTabSpawner(
@@ -75,9 +76,7 @@ void FGPUPVSEditorModule::StartupModule()
 
 void FGPUPVSEditorModule::ShutdownModule()
 {
-	// This function may be called during shutdown to clean up your module.  For modules that support dynamic reloading,
-	// we call this function before unloading the module.
-
+	// Cleanup
 	UToolMenus::UnRegisterStartupCallback(this);
 
 	UToolMenus::UnregisterOwner(this);
@@ -122,7 +121,7 @@ void FGPUPVSEditorModule::Button2Clicked()
 
 void FGPUPVSEditorModule::RegisterMenus()
 {
-	// Owner will be used for cleanup in call to UToolMenus::UnregisterOwner
+	// Owner scope
 	FToolMenuOwnerScoped OwnerScoped(this);
 
 	{
@@ -301,4 +300,3 @@ bool FGPUPVSEditorModule::Tick(float DeltaSeconds)
 }
 
 #undef LOCTEXT_NAMESPACE
-

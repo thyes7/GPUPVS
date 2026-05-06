@@ -6,13 +6,12 @@
 class UWorld;
 
 /**
- * GPUPVS 系统：一套“预计算可见性”离线构建流程（对齐 Lightmass 的 PrecomputedVisibility）。
+ * GPUPVS 系统
  *
- * BuildPVS 流程：
- * - Collect：收集 PVS Volumes、Setup 几何与遮挡几何
- * - Setup：GPU 栅格化高度区间，CPU 生成 3D Cells
- * - Compute：计算每个 Cell 的可见性 bitset（group→mesh）
- * - WriteBack：写回资源/关卡数据（未实现）
+ * - Collect：采集 PVS Volumes / 几何
+ * - Setup：栅格化高度区间 + 生成 Cells
+ * - Compute：Cell 可见性
+ * - WriteBack：写回（WIP）
  */
 class GPUPVS_API FGPUPVS
 {
@@ -37,11 +36,11 @@ public:
     FGPUPVS(UWorld* InWorld);
     ~FGPUPVS();
 
-	/** 执行一次完整构建（主要用于调试/迭代）。 */
+	// 执行一次完整构建
     void BuildPVS();
 	const TArray<FPVSCell>& GetCells() const { return Scene.GetCells(); }
 	void SetParams(const FParams& InParams);
-	/** 打印当前缓存数据概览（cells/meshes/groups/bitset）。 */
+	// 打印调试信息
 	void DumpSummary() const;
 
 private:
@@ -51,7 +50,7 @@ private:
 	FParams Params;
 
 	/**
-	 * Setup 阶段栅格化结果（CPU 侧缓存）。
+	 * Setup 阶段栅格化结果
 	 * - RasterLayerCount：每个像素的层数
 	 * - RasterHeightRanges：每个像素每层的 (ZMin,ZMax)，索引为 [PixelIndex * RasterMaxLayers + LayerIndex]
 	 */
@@ -63,7 +62,7 @@ private:
     TArray<uint32> RasterLayerCount;
     TArray<FVector2f> RasterHeightRanges;
 
-    /** 当前构建参数（插件内硬编码 + 面板可覆盖）。 */
+	// 当前构建参数（硬编码 + 面板覆盖）
     int32 RasterMaxLayersLimit;
     int32 VisibilityRayCount;
     float VisibilityMaxDistance;
@@ -80,10 +79,10 @@ private:
 	void ResetRasterResults();
     void InitDefaultParams();
 
-	/** Setup：计算/读取高度区间，并生成 Cells。 */
+	// Setup：高度区间 + Cells
 	void SetupPrecomputedVisibility();
-	/** Compute：计算每个 Cell 的可见性。 */
+	// Compute：Cell 可见性
 	void ComputeVisibility();
-	/** Write：写回资源/关卡数据（未实现）。 */
+	// Write：写回（未实现）
 	void WriteBack();
 };

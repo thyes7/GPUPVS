@@ -5,8 +5,7 @@
 #include "Framework/Commands/Commands.h"
 
 /**
- * GPUPVS 编辑器命令集合。
- * 仅负责定义命令与快捷键信息，不包含具体执行逻辑。
+ * 编辑器命令
  */
 class FGPUPVSCommands : public TCommands<FGPUPVSCommands>
 {

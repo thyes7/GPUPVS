@@ -100,7 +100,6 @@ void FShaderDispatcher::DispatchSimpleCS(FRDGBuilder& GraphBuilder, uint32 IntA,
 
 	TShaderMapRef<FSimpleCS> SimpleShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
 
-	// 调度（不做 readback）
 	FComputeShaderUtils::AddPass(
 		GraphBuilder,
 		RDG_EVENT_NAME("SimpleComputePass"),
@@ -127,6 +126,7 @@ FShaderDispatcher::FRasterAABBOutputs FShaderDispatcher::DispatchRasterAABB(
         return Outputs;
     }
 
+	// CreateStructuredBuffer 把 CPU 数据拷贝到 RDG 上传 buffer
     FRDGBufferRef VerticesBuffer = CreateStructuredBuffer(
         GraphBuilder,
         TEXT("GPUPVS.RasterAABB.Vertices"),
@@ -214,6 +214,8 @@ FShaderDispatcher::FVisibilityOutputs FShaderDispatcher::DispatchVisibility(
 
 	const uint32 WordsPerCell = FMath::DivideAndRoundUp(NumMeshes, 32u);
 	const uint32 TotalWords = NumCells * WordsPerCell;
+
+	// bitset（u32 words），GPU 用 InterlockedOr 写位，避免线程间写冲突。
 
 	FRDGBufferRef CellsBuffer = CreateStructuredBuffer(
 		GraphBuilder,
@@ -305,6 +307,8 @@ FShaderDispatcher::FVisibilityOutputs FShaderDispatcher::DispatchVisibility(
 
 	const uint32 GroupCountX = FMath::DivideAndRoundUp(NumMeshes, 8u);
 	const uint32 GroupCountY = FMath::DivideAndRoundUp(NumCells, 8u);
+
+	// numthreads(THREADS_X, THREADS_Y) 对应 dispatch 的 GroupCountX/Y
 
 	FComputeShaderUtils::AddPass(
 		GraphBuilder,

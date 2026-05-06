@@ -1,10 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 /**
- * 编辑器命令注册。
- *
- * 说明：
- * - 这里只负责声明 UI_COMMAND，与具体执行逻辑解耦。
- * - 执行逻辑在 GPUPVSEditorModule 中绑定（MapAction）。
+ * 编辑器命令注册：
+ * - UI_COMMAND 声明
+ * - 绑定逻辑在 GPUPVSEditorModule（MapAction）
  */
 
 #include "GPUPVSCommands.h"

@@ -200,13 +200,13 @@ public:
 // Shader 调度入口
 // ========================================
 /**
- * 统一封装 RDG Buffer 创建、参数绑定与 Dispatch。
- * 约定：所有输出 buffer 都是 RDG buffer，需要由调用侧决定是否做 readback。
+ * 统一封装 RDG Buffer 创建、参数绑定与 Dispatch
+ * 所有输出 buffer 都是 RDG buffer
  */
 class FShaderDispatcher
 {
 public:
-	/** 最小样例调度（不做 readback）。 */
+
     static void DispatchSimpleCS(FRDGBuilder& GraphBuilder, uint32 IntA, uint32 IntB);
 
     struct FRasterAABBOutputs
@@ -216,7 +216,7 @@ public:
     };
 
 	/**
-	 * Setup：将三角形栅格化到 (X,Y) 网格，输出每个像素的高度区间（多层）。
+	 * Setup：将三角形栅格化到 (X,Y) 网格，输出每个像素的高度区间（多层）
 	 *
 	 * 输出：
 	 * - LayerCount：每个像素的有效层数
@@ -245,8 +245,8 @@ public:
 	};
 
 	/**
-	 * Mesh 可见性（单阶段版本，主要用于对比/回归）。
-	 * 输出为每个 Cell 一份 mesh bitset（uint32 words）。
+	 * Mesh 可见性（单阶段版本，主要用于对比/回归）
+	 * 输出为每个 Cell 一份 mesh bitset（uint32 words）
 	 */
 	static FVisibilityOutputs DispatchVisibility(
 		FRDGBuilder& GraphBuilder,
@@ -271,7 +271,7 @@ public:
 		uint32 GroupWordsPerCell = 0;
 	};
 
-	/** Group 可见性 pass（输出 group bitset）。 */
+	// Group 可见性 pass（输出 group bitset）
 	static FVisibilityGroupOutputs DispatchVisibilityGroups(
 		FRDGBuilder& GraphBuilder,
 		TConstArrayView<FGPUPVSBox3f> Cells,
@@ -288,8 +288,8 @@ public:
 		float MaxDistance);
 
 	/**
-	 * Mesh 可见性 pass（依赖 group bitset 做快速跳过）。
-	 * - MeshToGroup=0xFFFFFFFF 表示不入组，直接做 mesh query（对齐 Lightmass 行为）
+	 * Mesh 可见性 pass
+	 * - MeshToGroup=0xFFFFFFFF 表示不入组，直接 mesh query
 	 */
 	static FVisibilityOutputs DispatchVisibilityMeshesWithGroups(
 		FRDGBuilder& GraphBuilder,

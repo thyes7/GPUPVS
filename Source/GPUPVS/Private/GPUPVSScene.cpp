@@ -1,6 +1,6 @@
 /**
- * 场景采集与扁平化。
- * 仅保留 PVS 构建所需的数据：Volumes、Setup 几何、遮挡几何、可见性目标 Bounds。
+ * 场景采集与扁平化
+ * 仅保留 PVS 构建所需的数据：Volumes、Setup 几何、遮挡几何、可见性目标 Bounds
  */
 #include "GPUPVSScene.h"
 #include "Engine/World.h"
@@ -143,10 +143,12 @@ void FPVSScene::CollectFromWorld(UWorld* InWorld)
 					const FStaticMeshVertexBuffer& StaticMeshVertexBuffer = LOD.VertexBuffers.StaticMeshVertexBuffer;
 					FIndexArrayView IndexView = LOD.IndexBuffer.GetArrayView();
 
+					// Setup 只取 volume 附近几何，先用 bounds 粗过滤
 					const bool bForSetup = DoesBoxIntersectVisibilityVolume(WorldBox);
 
 					auto AppendOccluderVertices = [&]()
 					{
+						// 遮挡几何
 						FTransform WorldTransform = StaticMeshComp->GetComponentTransform();
 						const uint32 NumVertices = PositionBuffer.GetNumVertices();
 
@@ -162,6 +164,7 @@ void FPVSScene::CollectFromWorld(UWorld* InWorld)
 
 					auto AppendSetupVertices = [&]()
 					{
+						// Setup 需要法线（朝上过滤）
 						FTransform WorldTransform = StaticMeshComp->GetComponentTransform();
 						const uint32 NumVertices = PositionBuffer.GetNumVertices();
 
@@ -189,14 +192,15 @@ void FPVSScene::CollectFromWorld(UWorld* InWorld)
 						const FStaticMeshSection& Section = LOD.Sections[SectionIdx];
 						UMaterialInterface* Mat = StaticMeshComp->GetMaterial(Section.MaterialIndex);
 
+						// 遮挡语义：静态 + 不透明
 						const bool bIsOpaque = !(Mat && Mat->GetBlendMode() != BLEND_Opaque);
 						const bool bAddOccluder = bIsOpaque;
-					const bool bAddSetup = bForSetup && (bIsOpaque || !VisibilitySettings.bPlaceCellsOnOpaqueOnly);
+						const bool bAddSetup = bForSetup && (bIsOpaque || !VisibilitySettings.bPlaceCellsOnOpaqueOnly);
 
 						if (!bIsOpaque)
 						{
 							NumOccluderTrianglesSkippedByMaterial += (int64)Section.NumTriangles;
-						if (bForSetup && VisibilitySettings.bPlaceCellsOnOpaqueOnly)
+							if (bForSetup && VisibilitySettings.bPlaceCellsOnOpaqueOnly)
 							{
 								NumSetupTrianglesSkippedByMaterial += (int64)Section.NumTriangles;
 							}
