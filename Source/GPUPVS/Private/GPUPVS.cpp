@@ -15,6 +15,9 @@
 #include "RenderingThread.h"
 #include "RHIGPUReadback.h"
 
+#if WITH_EDITOR
+#endif
+
 FGPUPVS::FGPUPVS(UWorld* InWorld)
     : World(InWorld), Scene()
 {
@@ -24,6 +27,10 @@ FGPUPVS::FGPUPVS(UWorld* InWorld)
 FGPUPVS::~FGPUPVS()
 {
 }
+
+// -----------------------------------------------------------------------------
+// Core State
+// -----------------------------------------------------------------------------
 
 void FGPUPVS::ResetRasterResults()
 {
@@ -47,23 +54,18 @@ void FGPUPVS::InitDefaultParams()
 void FGPUPVS::SetParams(const FParams& InParams)
 {
 	Params = InParams;
+	SetupParams = Params.Setup;
+	ComputeParams = Params.Compute;
+	WriteBackParams = Params.WriteBack;
 
 	Scene.SetCellSize(Params.CellSize);
 	Scene.SetPlayAreaHeight(Params.PlayAreaHeight);
 	Scene.SetPlaceCellsOnOpaqueOnly(Params.bPlaceCellsOnOpaqueOnly);
-
-	RasterMaxLayersLimit = Params.RasterMaxLayersLimit;
-
-	VisibilityMaxDistance = Params.VisibilityMaxDistance;
-	VisibilityNumCellSamples = Params.VisibilityNumCellSamples;
-	VisibilityMinMeshSamples = Params.VisibilityMinMeshSamples;
-	VisibilityMaxMeshSamples = Params.VisibilityMaxMeshSamples;
-	VisibilityNumImportanceSamples = Params.VisibilityNumImportanceSamples;
-	VisibilityMeshBoundsScale = Params.VisibilityMeshBoundsScale;
-	VisibilityBVHLeafTriLimit = Params.VisibilityBVHLeafTriLimit;
-
-	VisibilityRayCount = VisibilityNumCellSamples * VisibilityMaxMeshSamples + VisibilityNumImportanceSamples;
 }
+
+// -----------------------------------------------------------------------------
+// Build Pipeline
+// -----------------------------------------------------------------------------
 
 void FGPUPVS::BuildPVS()
 {
@@ -75,16 +77,22 @@ void FGPUPVS::BuildPVS()
 	const double BuildStart = FPlatformTime::Seconds();
 	GPUPVS_LOG(Log, TEXT("[Build] Start World=%s"), *World->GetName());
 	// 打印最终生效参数
-	GPUPVS_LOG(Log, TEXT("[Params] CellSize=%.2f PlayAreaHeight=%.2f PlaceCellsOnOpaqueOnly=%s MeshBoundsScale=%.2f NumCellSamples=%d MinMeshSamples=%d MaxMeshSamples=%d NumImportanceSamples=%d MaxDistance=%.2f"),
+	GPUPVS_LOG(Log, TEXT("[Params] CellSize=%.2f PlayAreaHeight=%.2f PlaceCellsOnOpaqueOnly=%s MaxLayers=%d MergeEpsilon=%.2f MaxCellsPerColumn=%d CellBottomOffset=%.2f MeshBoundsScale=%.2f NumCellSamples=%d MinMeshSamples=%d MaxMeshSamples=%d NumImportanceSamples=%d MaxDistance=%.2f WriteBackPreview=%s EngineWriteBack=%s"),
 		Scene.GetSettings().CellSize,
 		Scene.GetSettings().PlayAreaHeight,
 		Scene.GetSettings().bPlaceCellsOnOpaqueOnly ? TEXT("true") : TEXT("false"),
-		VisibilityMeshBoundsScale,
-		VisibilityNumCellSamples,
-		VisibilityMinMeshSamples,
-		VisibilityMaxMeshSamples,
-		VisibilityNumImportanceSamples,
-		VisibilityMaxDistance);
+		SetupParams.RasterMaxLayersLimit,
+		SetupParams.RangeMergeEpsilon,
+		SetupParams.MaxCellsPerColumn,
+		SetupParams.CellBottomOffset,
+		ComputeParams.MeshBoundsScale,
+		ComputeParams.NumCellSamples,
+		ComputeParams.MinMeshSamples,
+		ComputeParams.MaxMeshSamples,
+		ComputeParams.NumImportanceSamples,
+		ComputeParams.MaxDistance,
+		WriteBackParams.bEnablePreviewLog ? TEXT("true") : TEXT("false"),
+		WriteBackParams.bEnableEngineWriteBack ? TEXT("true") : TEXT("false"));
 
 	Scene.CollectFromWorld(World);
 	SetupPrecomputedVisibility();
@@ -168,6 +176,10 @@ void FGPUPVS::DumpSummary() const
 		NumMeshes);
 }
 
+// -----------------------------------------------------------------------------
+// Setup
+// -----------------------------------------------------------------------------
+
 void FGPUPVS::SetupPrecomputedVisibility()
 {
 	const float CellSize = Scene.GetSettings().CellSize;
@@ -201,7 +213,7 @@ void FGPUPVS::SetupPrecomputedVisibility()
 	const FVector3f GridOrigin = VisibilityVolumeBounds.Min;
 	const uint32 GridSizeX = (uint32)SizeX;
 	const uint32 GridSizeY = (uint32)SizeY;
-	const uint32 MaxLayers = (uint32)RasterMaxLayersLimit;
+	const uint32 MaxLayers = (uint32)SetupParams.RasterMaxLayersLimit;
 
 	GPUPVS_LOG(Log, TEXT("[Setup] BoundsMin=%s BoundsMax=%s CellSize=%.2f Grid=%ux%u MaxLayers=%u Vertices=%d Triangles=%d Volumes=%d"),
 		*VisibilityVolumeBounds.Min.ToString(),
@@ -287,9 +299,9 @@ void FGPUPVS::SetupPrecomputedVisibility()
 	const double WaitStart = FPlatformTime::Seconds();
 	while (!ReadbackState->LayerCountReadback->IsReady() || !ReadbackState->HeightRangesReadback->IsReady())
 	{
-		FPlatformProcess::Sleep(0.005f);
+		FPlatformProcess::Sleep(FMath::Max(SetupParams.RasterReadbackPollSeconds, 0.0f));
 		// 超时保护：避免 GPU hang 卡死
-		if (FPlatformTime::Seconds() - WaitStart > 30.0)
+		if (FPlatformTime::Seconds() - WaitStart > FMath::Max(SetupParams.RasterReadbackTimeoutSeconds, 0.0f))
 		{
 			FRHIGPUBufferReadback* LayerRB = ReadbackState->LayerCountReadback;
 			FRHIGPUBufferReadback* HeightRB = ReadbackState->HeightRangesReadback;
@@ -383,9 +395,23 @@ void FGPUPVS::SetupPrecomputedVisibility()
 		NewCells.Reserve((int32)(GridSizeX * GridSizeY * 2u));
 
 		TArray<FVector2f> HitRanges;
+		TArray<FVector2f> MergedHitRanges;
 		TArray<FVector2f> PlacedHeightRanges;
 		HitRanges.Reserve((int32)MaxLayers);
+		MergedHitRanges.Reserve((int32)MaxLayers);
 		PlacedHeightRanges.Reserve((int32)MaxLayers * 2);
+		const float MergeEpsilon = SetupParams.RangeMergeEpsilon;
+		const int32 MaxCellsPerColumn = FMath::Max(1, SetupParams.MaxCellsPerColumn);
+		const float CellBottomOffset = SetupParams.CellBottomOffset;
+		const float TestHeights[3] =
+		{
+			SetupParams.PlacementProbeHeightA,
+			SetupParams.PlacementProbeHeightB,
+			SetupParams.PlacementProbeHeightC
+		};
+
+		uint32 PixelsWithMergedRanges = 0;
+		uint32 MaxMergedRangeCountObserved = 0;
 
 		for (uint32 Y = 0; Y < GridSizeY; ++Y)
 		{
@@ -408,8 +434,36 @@ void FGPUPVS::SetupPrecomputedVisibility()
 
 				HitRanges.Sort([](const FVector2f& A, const FVector2f& B)
 				{
-					return A.Y < B.Y;
+					return A.X < B.X;
 				});
+
+				// Raster 阶段输出的是“每个三角形在该像素上的高度段”，不是已经合并好的真实垂直层。
+				// 这里先把重叠/相邻的高度段并起来，再按合并后的层生成 cells。
+				MergedHitRanges.Reset();
+				for (const FVector2f& Range : HitRanges)
+				{
+					if (MergedHitRanges.IsEmpty())
+					{
+						MergedHitRanges.Add(Range);
+						continue;
+					}
+
+					FVector2f& LastRange = MergedHitRanges.Last();
+					if (Range.X <= LastRange.Y + MergeEpsilon)
+					{
+						LastRange.Y = FMath::Max(LastRange.Y, Range.Y);
+					}
+					else
+					{
+						MergedHitRanges.Add(Range);
+					}
+				}
+
+				if (MergedHitRanges.Num() > 1)
+				{
+					PixelsWithMergedRanges++;
+				}
+				MaxMergedRangeCountObserved = FMath::Max(MaxMergedRangeCountObserved, (uint32)MergedHitRanges.Num());
 
 				const FVector2f CurrentPosition(
 					(float)RasterGridOrigin.X + ((float)X + 0.5f) * CellSize,
@@ -417,17 +471,23 @@ void FGPUPVS::SetupPrecomputedVisibility()
 
 				auto AddCellAtBottom = [&](float CellBottom)
 				{
+					if (PlacedHeightRanges.Num() >= MaxCellsPerColumn)
+					{
+						return;
+					}
+
+					const float FinalCellBottom = CellBottom + CellBottomOffset;
 					FPVSCell NewCell;
 					NewCell.Index = NewCells.Num();
 					NewCell.Bounds = FBox3f(
 						FVector3f(
 							CurrentPosition.X - CellSize * 0.5f,
 							CurrentPosition.Y - CellSize * 0.5f,
-							CellBottom),
+							FinalCellBottom),
 						FVector3f(
 							CurrentPosition.X + CellSize * 0.5f,
 							CurrentPosition.Y + CellSize * 0.5f,
-							CellBottom + PlayAreaHeight));
+							FinalCellBottom + PlayAreaHeight));
 					NewCell.Center = NewCell.Bounds.GetCenter();
 					NewCells.Add(NewCell);
 					PlacedHeightRanges.Add(FVector2f(NewCell.Bounds.Min.Z, NewCell.Bounds.Max.Z));
@@ -436,12 +496,12 @@ void FGPUPVS::SetupPrecomputedVisibility()
 				float LastSampleHeight = -FLT_MAX;
 				PlacedHeightRanges.Reset();
 
-				for (int32 HeightIndex = 0; HeightIndex < HitRanges.Num(); ++HeightIndex)
+				for (int32 HeightIndex = 0; HeightIndex < MergedHitRanges.Num(); ++HeightIndex)
 				{
-					const float CurrentMaxHeight = HitRanges[HeightIndex].Y;
+					const float CurrentMaxHeight = MergedHitRanges[HeightIndex].Y;
 
-					if (HeightIndex + 1 == HitRanges.Num()
-						|| ((HitRanges[HeightIndex + 1].Y - CurrentMaxHeight) > PlayAreaHeight
+					if (HeightIndex + 1 == MergedHitRanges.Num()
+						|| ((MergedHitRanges[HeightIndex + 1].Y - CurrentMaxHeight) > PlayAreaHeight
 							&& CurrentMaxHeight - LastSampleHeight > PlayAreaHeight))
 					{
 						AddCellAtBottom(CurrentMaxHeight);
@@ -449,13 +509,11 @@ void FGPUPVS::SetupPrecomputedVisibility()
 					}
 				}
 
-				const float TestHeights[3] = { 0.4f, 0.6f, 0.8f };
-
-				for (int32 HeightIndex = 0; HeightIndex < HitRanges.Num() - 1; ++HeightIndex)
+				for (int32 HeightIndex = 0; HeightIndex < MergedHitRanges.Num() - 1; ++HeightIndex)
 				{
 					for (int32 ExtremaIndex = 0; ExtremaIndex < 2; ++ExtremaIndex)
 					{
-						const float CurrentMaxHeight = ExtremaIndex == 0 ? HitRanges[HeightIndex].X : HitRanges[HeightIndex].Y;
+						const float CurrentMaxHeight = ExtremaIndex == 0 ? MergedHitRanges[HeightIndex].X : MergedHitRanges[HeightIndex].Y;
 						const float CompareHeight = CurrentMaxHeight + 0.5f * PlayAreaHeight;
 
 						for (int32 TestIndex = 0; TestIndex < UE_ARRAY_COUNT(TestHeights); ++TestIndex)
@@ -487,7 +545,7 @@ void FGPUPVS::SetupPrecomputedVisibility()
 								}
 							}
 
-							if (!bInsideCell)
+							if (!bInsideCell && PlacedHeightRanges.Num() < MaxCellsPerColumn)
 							{
 								float DesiredCellBottom = CurrentMaxHeight;
 
@@ -515,6 +573,11 @@ void FGPUPVS::SetupPrecomputedVisibility()
 		}
 
 		Scene.SetCells(MoveTemp(NewCells));
+
+		GPUPVS_LOG(Log, TEXT("[Setup] MergedRanges PixelsWithMulti=%u/%u MaxMergedRanges=%u"),
+			PixelsWithMergedRanges,
+			PixelCount,
+			MaxMergedRangeCountObserved);
 	}
 
 	uint32 PixelsWithAnyLayer = 0;
@@ -579,6 +642,7 @@ void FGPUPVS::ComputeVisibility()
 	const TArray<FBox3f>& VisibilityMeshBounds = Scene.GetVisibilityMeshBounds();
 	const TArray<FVector3f>& OccluderVertices = Scene.GetOccluderVertices();
 	const TArray<uint32>& OccluderIndices = Scene.GetOccluderIndices();
+	const TArray<int32>& OccluderTriangleTargetIds = Scene.GetOccluderTriangleTargetIds();
 
 	if (CellList.IsEmpty() || VisibilityMeshBounds.IsEmpty() || OccluderVertices.IsEmpty() || OccluderIndices.IsEmpty())
 	{
@@ -598,7 +662,7 @@ void FGPUPVS::ComputeVisibility()
 	FGPUPVSBVHBuilder::Build(
 		OccluderVertices,
 		OccluderIndices,
-		VisibilityBVHLeafTriLimit,
+		ComputeParams.BVHLeafTriLimit,
 		BvhNodes,
 		BvhLeafTriIndices);
 
@@ -620,6 +684,14 @@ void FGPUPVS::ComputeVisibility()
 			BVHLeafTriCount,
 			OccluderTriangleCount);
 	}
+	if ((uint32)OccluderTriangleTargetIds.Num() != OccluderTriangleCount)
+	{
+		GPUPVS_LOG(Error, TEXT("[Compute] OccluderTriangleTargetIds mismatch. Owners=%d OccluderTriangles=%u"),
+			OccluderTriangleTargetIds.Num(),
+			OccluderTriangleCount);
+		Scene.SetVisibilityWords({}, 0, 0);
+		return;
+	}
 
 	TArray<FGPUPVSBox3f> CellBoxes;
 	CellBoxes.Reserve(CellList.Num());
@@ -639,6 +711,25 @@ void FGPUPVS::ComputeVisibility()
 		B.Min = B0.Min;
 		B.Max = B0.Max;
 		MeshBoxes.Add(B);
+	}
+
+	TArray<FGPUPVSBox3f> OccluderBoxes;
+	OccluderBoxes.Reserve(OccluderTriangleCount);
+	for (uint32 TriIndex = 0; TriIndex < OccluderTriangleCount; ++TriIndex)
+	{
+		const uint32 I0 = OccluderIndices[(int32)TriIndex * 3 + 0];
+		const uint32 I1 = OccluderIndices[(int32)TriIndex * 3 + 1];
+		const uint32 I2 = OccluderIndices[(int32)TriIndex * 3 + 2];
+
+		FBox3f TriBounds(ForceInit);
+		TriBounds += OccluderVertices[(int32)I0];
+		TriBounds += OccluderVertices[(int32)I1];
+		TriBounds += OccluderVertices[(int32)I2];
+
+		FGPUPVSBox3f B;
+		B.Min = TriBounds.Min;
+		B.Max = TriBounds.Max;
+		OccluderBoxes.Add(B);
 	}
 
 	auto BuildVisibilityGroups = [&](TConstArrayView<FBox3f> InMeshBounds, TArray<FGPUPVSBox3f>& OutGroups, TArray<uint32>& OutMeshToGroup)
@@ -862,17 +953,19 @@ void FGPUPVS::ComputeVisibility()
 		[CellBoxesData = MoveTemp(CellBoxes),
 		 MeshBoxesData = MoveTemp(MeshBoxes),
 		 GroupBoxesData = MoveTemp(GroupBoxes),
+		 OccluderBoxesData = MoveTemp(OccluderBoxes),
 		 MeshToGroupData = MoveTemp(MeshToGroup),
 		 NodesData = MoveTemp(BvhNodesGpu),
 		 LeafTrisData = MoveTemp(BvhLeafTriIndices),
 		 OccluderVerticesCopy = OccluderVertices,
 		 OccluderIndicesCopy = OccluderIndices,
-		 NumCellSamples = (uint32)FMath::Max(0, VisibilityNumCellSamples),
-		 MinMeshSamples = (uint32)FMath::Max(1, VisibilityMinMeshSamples),
-		 MaxMeshSamples = (uint32)FMath::Max(1, VisibilityMaxMeshSamples),
-		 NumImportanceSamples = (uint32)FMath::Max(0, VisibilityNumImportanceSamples),
-		 MeshBoundsScale = VisibilityMeshBoundsScale,
-		 MaxDistance = VisibilityMaxDistance,
+		 TriangleTargetIdsCopy = OccluderTriangleTargetIds,
+		 NumCellSamples = (uint32)FMath::Max(0, ComputeParams.NumCellSamples),
+		 MinMeshSamples = (uint32)FMath::Max(1, ComputeParams.MinMeshSamples),
+		 MaxMeshSamples = (uint32)FMath::Max(1, ComputeParams.MaxMeshSamples),
+		 NumImportanceSamples = (uint32)FMath::Max(0, ComputeParams.NumImportanceSamples),
+		 MeshBoundsScale = ComputeParams.MeshBoundsScale,
+		 MaxDistance = ComputeParams.MaxDistance,
 		 Readback](FRHICommandListImmediate& RHICmdList)
 		{
 			FRDGBuilder GraphBuilder(RHICmdList);
@@ -881,10 +974,12 @@ void FGPUPVS::ComputeVisibility()
 				GraphBuilder,
 				CellBoxesData,
 				GroupBoxesData,
+				OccluderBoxesData,
 				NodesData,
 				LeafTrisData,
 				OccluderVerticesCopy,
 				OccluderIndicesCopy,
+				TriangleTargetIdsCopy,
 				NumCellSamples,
 				MinMeshSamples,
 				MaxMeshSamples,
@@ -902,10 +997,12 @@ void FGPUPVS::ComputeVisibility()
 				GroupOutputs.GroupVisibilityWords,
 				GroupOutputs.NumGroups,
 				GroupOutputs.GroupWordsPerCell,
+				OccluderBoxesData,
 				NodesData,
 				LeafTrisData,
 				OccluderVerticesCopy,
 				OccluderIndicesCopy,
+				TriangleTargetIdsCopy,
 				NumCellSamples,
 				MinMeshSamples,
 				MaxMeshSamples,
@@ -971,8 +1068,8 @@ void FGPUPVS::ComputeVisibility()
 	const double WaitStart = FPlatformTime::Seconds();
 	while (!Readback->WordsReadback->IsReady() || !Readback->StatsReadback->IsReady() || !Readback->GroupStatsReadback->IsReady())
 	{
-		FPlatformProcess::Sleep(0.005f);
-		if (FPlatformTime::Seconds() - WaitStart > 60.0)
+		FPlatformProcess::Sleep(FMath::Max(ComputeParams.VisibilityReadbackPollSeconds, 0.0f));
+		if (FPlatformTime::Seconds() - WaitStart > FMath::Max(ComputeParams.VisibilityReadbackTimeoutSeconds, 0.0f))
 		{
 			FRHIGPUBufferReadback* RB = Readback->WordsReadback;
 			FRHIGPUBufferReadback* StatsRB = Readback->StatsReadback;
@@ -1168,8 +1265,4 @@ void FGPUPVS::ComputeVisibility()
 			Rays,
 			AvgRaysPerPair);
 	}
-}
-
-void FGPUPVS::WriteBack()
-{
 }

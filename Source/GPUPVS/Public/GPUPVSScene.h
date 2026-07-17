@@ -2,11 +2,6 @@
 
 #include "CoreMinimal.h"
 
-class AActor;
-
-class FStaticLightingMesh;
-class FStaticLightingMapping;
-
 class UWorld;
 
 /**
@@ -30,7 +25,6 @@ class FPrecomputedVisibilityVolume
 {
 public:
 	FBox3f Bounds;
-	TArray<FPlane4f> Planes;
 };
 
 /**
@@ -39,8 +33,8 @@ public:
 class FGPUPVSVisibilitySettings
 {
 public:
-    float CellSize;
-	float PlayAreaHeight;
+    float CellSize = 200.0f;
+	float PlayAreaHeight = 220.0f;
 	bool bPlaceCellsOnOpaqueOnly = true;
 };
 
@@ -50,8 +44,6 @@ public:
  * 当前输出：
  * - PrecomputedVisibilityVolumes：所有 PVS volume bounds
  * - SceneVertices / SceneIndices：合并后的世界空间三角网格（仅 StaticMeshComponent LOD0）
- * - SceneNormals：顶点法线（用于后续朝向过滤/采样分布等）
- * - TriangleBounds：每三角形包围盒（用于加速/剔除）
  */
 class FPVSScene
 {
@@ -83,18 +75,17 @@ public:
 	// 合并后的世界空间网格（StaticMeshComponent LOD0）
 	const TArray<FVector3f>& GetSceneVertices() const { return SceneVertices; }
 	const TArray<uint32>& GetSceneIndices() const { return SceneIndices; }
-	const TArray<FVector3f>& GetSceneNormals() const { return SceneNormals; }
-	const TArray<FBox3f>& GetTriangleBounds() const { return TriangleBounds; }
-
 	// PVS volumes
 	const TArray<FPrecomputedVisibilityVolume>& GetPrecomputedVisibilityVolumes() const { return PrecomputedVisibilityVolumes; }
 
 	// 遮挡几何（静态不透明）
 	const TArray<FVector3f>& GetOccluderVertices() const { return OccluderVertices; }
 	const TArray<uint32>& GetOccluderIndices() const { return OccluderIndices; }
+	const TArray<int32>& GetOccluderTriangleTargetIds() const { return OccluderTriangleTargetIds; }
 
 	// 可见性目标（Bounds 列表，索引对应 bitset）
 	const TArray<FBox3f>& GetVisibilityMeshBounds() const { return VisibilityMeshBounds; }
+	const TArray<FSoftObjectPath>& GetVisibilityMeshComponentPaths() const { return VisibilityMeshComponentPaths; }
 
 	uint32 GetVisibilityNumMeshes() const { return VisibilityNumMeshes; }
 	uint32 GetVisibilityWordsPerCell() const { return VisibilityWordsPerCell; }
@@ -117,13 +108,13 @@ private:
 
 	TArray<FVector3f> SceneVertices;
 	TArray<uint32> SceneIndices;
-	TArray<FVector3f> SceneNormals;
-	TArray<FBox3f> TriangleBounds;
 
 	TArray<FVector3f> OccluderVertices;
 	TArray<uint32> OccluderIndices;
+	TArray<int32> OccluderTriangleTargetIds;
 
 	TArray<FBox3f> VisibilityMeshBounds;
+	TArray<FSoftObjectPath> VisibilityMeshComponentPaths;
 	TArray<uint32> VisibilityWords;
 	uint32 VisibilityNumMeshes = 0;
 	uint32 VisibilityWordsPerCell = 0;

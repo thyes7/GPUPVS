@@ -3,32 +3,45 @@
  * 仅保留 PVS 构建所需的数据：Volumes、Setup 几何、遮挡几何、可见性目标 Bounds
  */
 #include "GPUPVSScene.h"
-#include "Engine/World.h"
-#include "GameFramework/Actor.h"
 
-#include "CoreMinimal.h"
-#include "Math/Vector.h"
-#include "Math/Box.h"
-#include "Math/UnrealMath.h"
-#include "Math/BoxSphereBounds.h"
-#include "Lightmass/PrecomputedVisibilityVolume.h"
 #include "Components/BrushComponent.h"
 #include "Components/PrimitiveComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
+#include "GameFramework/Actor.h"
 #include "Lightmass/PrecomputedVisibilityVolume.h"
 #include "Materials/MaterialInterface.h"
 #include "StaticMeshResources.h"
-#include "UObject/UObjectIterator.h"
+
 #include "GPUPVSLog.h"
+
+namespace
+{
+	static bool ContainsSkySphereToken(const FString& Value)
+	{
+		if (Value.IsEmpty())
+		{
+			return false;
+		}
+
+		const FString LowerValue = Value.ToLower();
+		return LowerValue.Contains(TEXT("skysphere"))
+			|| LowerValue.Contains(TEXT("sky sphere"))
+			|| LowerValue.Contains(TEXT("sm_skysphere"));
+	}
+
+	static bool ShouldSkipSetupGeometryForSkySphere(const AActor* Actor, const UStaticMeshComponent* StaticMeshComponent, const UStaticMesh* StaticMesh)
+	{
+		return (Actor && (ContainsSkySphereToken(Actor->GetName()) || ContainsSkySphereToken(Actor->GetClass()->GetName())))
+			|| (StaticMeshComponent && ContainsSkySphereToken(StaticMeshComponent->GetName()))
+			|| (StaticMesh && ContainsSkySphereToken(StaticMesh->GetName()));
+	}
+}
 
 FPVSScene::FPVSScene()
 {
-	VisibilitySettings.CellSize = 200.0f;
-	VisibilitySettings.PlayAreaHeight = 220.0f;
-	VisibilitySettings.bPlaceCellsOnOpaqueOnly = true;
 }
 
 void FPVSScene::Reset()
@@ -39,13 +52,13 @@ void FPVSScene::Reset()
 
 	SceneVertices.Reset();
 	SceneIndices.Reset();
-	SceneNormals.Reset();
-	TriangleBounds.Reset();
 
 	OccluderVertices.Reset();
 	OccluderIndices.Reset();
+	OccluderTriangleTargetIds.Reset();
 
 	VisibilityMeshBounds.Reset();
+	VisibilityMeshComponentPaths.Reset();
 	VisibilityWords.Reset();
 	VisibilityNumMeshes = 0;
 	VisibilityWordsPerCell = 0;
@@ -75,6 +88,7 @@ void FPVSScene::CollectFromWorld(UWorld* InWorld)
 	int64 NumSetupTrianglesAdded = 0;
 	int64 NumOccluderTrianglesAdded = 0;
 	int64 NumSetupTrianglesSkippedByMaterial = 0;
+	int64 NumSetupTrianglesSkippedBySky = 0;
 	int64 NumOccluderTrianglesSkippedByMaterial = 0;
 
 	// 遍历收集APrecomputedVisibilityVolume
@@ -136,7 +150,9 @@ void FPVSScene::CollectFromWorld(UWorld* InWorld)
 				{
 					const FBox3f WorldBox(Prim->Bounds.GetBox());
 
+					const int32 VisibilityId = VisibilityMeshBounds.Num();
 					VisibilityMeshBounds.Add(WorldBox);
+					VisibilityMeshComponentPaths.Add(FSoftObjectPath(StaticMeshComp));
 
 					const FStaticMeshLODResources& LOD = StaticMesh->GetRenderData()->LODResources[0];
 					const FPositionVertexBuffer& PositionBuffer = LOD.VertexBuffers.PositionVertexBuffer;
@@ -145,6 +161,8 @@ void FPVSScene::CollectFromWorld(UWorld* InWorld)
 
 					// Setup 只取 volume 附近几何，先用 bounds 粗过滤
 					const bool bForSetup = DoesBoxIntersectVisibilityVolume(WorldBox);
+					const bool bSkipSetupForSkySphere = ShouldSkipSetupGeometryForSkySphere(Actor, StaticMeshComp, StaticMesh);
+					const bool bUseForSetup = bForSetup && !bSkipSetupForSkySphere;
 
 					auto AppendOccluderVertices = [&]()
 					{
@@ -164,28 +182,22 @@ void FPVSScene::CollectFromWorld(UWorld* InWorld)
 
 					auto AppendSetupVertices = [&]()
 					{
-						// Setup 需要法线（朝上过滤）
 						FTransform WorldTransform = StaticMeshComp->GetComponentTransform();
 						const uint32 NumVertices = PositionBuffer.GetNumVertices();
 
 						const uint32 VertexOffset = (uint32)SceneVertices.Num();
 						SceneVertices.Reserve(SceneVertices.Num() + NumVertices);
-						SceneNormals.Reserve(SceneNormals.Num() + NumVertices);
 
 						for (uint32 i = 0; i < NumVertices; ++i)
 						{
 							FVector WorldPos = WorldTransform.TransformPosition((FVector)PositionBuffer.VertexPosition(i));
 							SceneVertices.Add((FVector3f)WorldPos);
-
-							FVector WorldNormal = WorldTransform.TransformVector((FVector)StaticMeshVertexBuffer.VertexTangentZ(i));
-							WorldNormal.Normalize();
-							SceneNormals.Add((FVector3f)WorldNormal);
 						}
 						return VertexOffset;
 					};
 
 					const uint32 OccluderVertexOffset = AppendOccluderVertices();
-					const uint32 SetupVertexOffset = bForSetup ? AppendSetupVertices() : 0u;
+					const uint32 SetupVertexOffset = bUseForSetup ? AppendSetupVertices() : 0u;
 
 					for (int32 SectionIdx = 0; SectionIdx < LOD.Sections.Num(); ++SectionIdx)
 					{
@@ -195,12 +207,17 @@ void FPVSScene::CollectFromWorld(UWorld* InWorld)
 						// 遮挡语义：静态 + 不透明
 						const bool bIsOpaque = !(Mat && Mat->GetBlendMode() != BLEND_Opaque);
 						const bool bAddOccluder = bIsOpaque;
-						const bool bAddSetup = bForSetup && (bIsOpaque || !VisibilitySettings.bPlaceCellsOnOpaqueOnly);
+						const bool bAddSetup = bUseForSetup && (bIsOpaque || !VisibilitySettings.bPlaceCellsOnOpaqueOnly);
+
+						if (bForSetup && bSkipSetupForSkySphere)
+						{
+							NumSetupTrianglesSkippedBySky += (int64)Section.NumTriangles;
+						}
 
 						if (!bIsOpaque)
 						{
 							NumOccluderTrianglesSkippedByMaterial += (int64)Section.NumTriangles;
-							if (bForSetup && VisibilitySettings.bPlaceCellsOnOpaqueOnly)
+							if (bUseForSetup && VisibilitySettings.bPlaceCellsOnOpaqueOnly)
 							{
 								NumSetupTrianglesSkippedByMaterial += (int64)Section.NumTriangles;
 							}
@@ -221,6 +238,7 @@ void FPVSScene::CollectFromWorld(UWorld* InWorld)
 								OccluderIndices.Add(OccIndex0);
 								OccluderIndices.Add(OccIndex1);
 								OccluderIndices.Add(OccIndex2);
+								OccluderTriangleTargetIds.Add(VisibilityId);
 								NumOccluderTrianglesAdded++;
 							}
 
@@ -234,12 +252,6 @@ void FPVSScene::CollectFromWorld(UWorld* InWorld)
 								SceneIndices.Add(GlobalIndex1);
 								SceneIndices.Add(GlobalIndex2);
 								NumSetupTrianglesAdded++;
-
-								FBox3f TriBounds(ForceInit);
-								TriBounds += SceneVertices[GlobalIndex0];
-								TriBounds += SceneVertices[GlobalIndex1];
-								TriBounds += SceneVertices[GlobalIndex2];
-								TriangleBounds.Add(TriBounds);
 							}
 						}
 					}
@@ -276,10 +288,18 @@ void FPVSScene::CollectFromWorld(UWorld* InWorld)
 		NumOccluderTrianglesAdded,
 		NumSetupTrianglesSkippedByMaterial,
 		EndTime - StartTime);
-	GPUPVS_LOG(Log, TEXT("[Collect] PlaceCellsOnOpaqueOnly=%s OccluderSkippedByMaterial=%lld SetupSkippedByMaterial=%lld"),
+	GPUPVS_LOG(Log, TEXT("[Collect] PlaceCellsOnOpaqueOnly=%s OccluderSkippedByMaterial=%lld SetupSkippedByMaterial=%lld SetupSkippedBySky=%lld"),
 		VisibilitySettings.bPlaceCellsOnOpaqueOnly ? TEXT("true") : TEXT("false"),
 		NumOccluderTrianglesSkippedByMaterial,
-		NumSetupTrianglesSkippedByMaterial);
+		NumSetupTrianglesSkippedByMaterial,
+		NumSetupTrianglesSkippedBySky);
+
+	if (OccluderTriangleTargetIds.Num() != OccluderIndices.Num() / 3)
+	{
+		GPUPVS_LOG(Warning, TEXT("[Collect] OccluderTriangleTargetIds mismatch. Owners=%d OccluderTriangles=%d"),
+			OccluderTriangleTargetIds.Num(),
+			OccluderIndices.Num() / 3);
+	}
 
 	VisibilityNumMeshes = (uint32)VisibilityMeshBounds.Num();
 }

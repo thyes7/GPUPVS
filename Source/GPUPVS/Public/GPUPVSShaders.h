@@ -7,30 +7,7 @@
 #include "ShaderParameterStruct.h"
 #include "RenderGraphBuilder.h"
 
-// 前向声明
 class FShaderDispatcher;
-
-// ========================================
-// 简单 Compute Shader
-// ========================================
-/**
- * 最小样例：用于验证 RDG + Compute 的调度链路是否正常。
- */
-class FSimpleCS : public FGlobalShader
-{
-public:
-    DECLARE_GLOBAL_SHADER(FSimpleCS);
-    SHADER_USE_PARAMETER_STRUCT(FSimpleCS, FGlobalShader);
-
-    static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters);
-    static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment);
-
-    BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
-        SHADER_PARAMETER(uint32, IntA)
-        SHADER_PARAMETER(uint32, IntB)
-        SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<int>, OutputBuffer)
-    END_SHADER_PARAMETER_STRUCT()
-};
 
 class FRasterAABBCS : public FGlobalShader
 {
@@ -62,7 +39,9 @@ public:
 struct FGPUPVSBox3f
 {
 	FVector3f Min = FVector3f::ZeroVector;
+	float Pad0 = 0.0f;
 	FVector3f Max = FVector3f::ZeroVector;
+	float Pad1 = 0.0f;
 };
 
 /**
@@ -108,11 +87,13 @@ public:
 
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FGPUPVSBox3f>, InCells)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FGPUPVSBox3f>, InGroups)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FGPUPVSBox3f>, InOccluders)
 
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FGPUPVSBVHNodeGPU>, InBVHNodes)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, InBVHLeafTriIndices)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FVector3f>, InVertices)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, InIndices)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<int32>, InTriangleTargetIds)
 
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, OutVisibilityWords)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, OutStats)
@@ -149,47 +130,13 @@ public:
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FGPUPVSBox3f>, InMeshes)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, InMeshToGroup)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, InGroupVisibilityWords)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FGPUPVSBox3f>, InOccluders)
 
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FGPUPVSBVHNodeGPU>, InBVHNodes)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, InBVHLeafTriIndices)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FVector3f>, InVertices)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, InIndices)
-
-		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, OutVisibilityWords)
-		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, OutStats)
-	END_SHADER_PARAMETER_STRUCT()
-};
-
-class FVisibilityCS : public FGlobalShader
-{
-public:
-	DECLARE_GLOBAL_SHADER(FVisibilityCS);
-	SHADER_USE_PARAMETER_STRUCT(FVisibilityCS, FGlobalShader);
-
-	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters);
-	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment);
-
-	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
-		SHADER_PARAMETER(uint32, NumCells)
-		SHADER_PARAMETER(uint32, NumMeshes)
-		SHADER_PARAMETER(uint32, WordsPerCell)
-
-		SHADER_PARAMETER(uint32, NumCellSamples)
-		SHADER_PARAMETER(uint32, MinMeshSamples)
-		SHADER_PARAMETER(uint32, MaxMeshSamples)
-		SHADER_PARAMETER(uint32, NumImportanceSamples)
-
-		SHADER_PARAMETER(float, MeshBoundsScale)
-		SHADER_PARAMETER(float, MaxDistance)
-		SHADER_PARAMETER(uint32, EnableStats)
-
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FGPUPVSBox3f>, InCells)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FGPUPVSBox3f>, InMeshes)
-
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FGPUPVSBVHNodeGPU>, InBVHNodes)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, InBVHLeafTriIndices)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FVector3f>, InVertices)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, InIndices)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<int32>, InTriangleTargetIds)
 
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, OutVisibilityWords)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, OutStats)
@@ -206,9 +153,6 @@ public:
 class FShaderDispatcher
 {
 public:
-
-    static void DispatchSimpleCS(FRDGBuilder& GraphBuilder, uint32 IntA, uint32 IntB);
-
     struct FRasterAABBOutputs
     {
         FRDGBufferRef LayerCount = nullptr;
@@ -244,25 +188,6 @@ public:
 		uint32 WordsPerCell = 0;
 	};
 
-	/**
-	 * Mesh 可见性（单阶段版本，主要用于对比/回归）
-	 * 输出为每个 Cell 一份 mesh bitset（uint32 words）
-	 */
-	static FVisibilityOutputs DispatchVisibility(
-		FRDGBuilder& GraphBuilder,
-		TConstArrayView<FGPUPVSBox3f> Cells,
-		TConstArrayView<FGPUPVSBox3f> Meshes,
-		TConstArrayView<FGPUPVSBVHNodeGPU> BVHNodes,
-		TConstArrayView<uint32> BVHLeafTriIndices,
-		TConstArrayView<FVector3f> VerticesWS,
-		TConstArrayView<uint32> Indices,
-		uint32 NumCellSamples,
-		uint32 MinMeshSamples,
-		uint32 MaxMeshSamples,
-		uint32 NumImportanceSamples,
-		float MeshBoundsScale,
-		float MaxDistance);
-
 	struct FVisibilityGroupOutputs
 	{
 		FRDGBufferRef GroupVisibilityWords = nullptr;
@@ -276,10 +201,12 @@ public:
 		FRDGBuilder& GraphBuilder,
 		TConstArrayView<FGPUPVSBox3f> Cells,
 		TConstArrayView<FGPUPVSBox3f> Groups,
+		TConstArrayView<FGPUPVSBox3f> OccluderBoxes,
 		TConstArrayView<FGPUPVSBVHNodeGPU> BVHNodes,
 		TConstArrayView<uint32> BVHLeafTriIndices,
 		TConstArrayView<FVector3f> VerticesWS,
 		TConstArrayView<uint32> Indices,
+		TConstArrayView<int32> TriangleTargetIds,
 		uint32 NumCellSamples,
 		uint32 MinMeshSamples,
 		uint32 MaxMeshSamples,
@@ -299,10 +226,12 @@ public:
 		FRDGBufferRef GroupVisibilityWords,
 		uint32 NumGroups,
 		uint32 GroupWordsPerCell,
+		TConstArrayView<FGPUPVSBox3f> OccluderBoxes,
 		TConstArrayView<FGPUPVSBVHNodeGPU> BVHNodes,
 		TConstArrayView<uint32> BVHLeafTriIndices,
 		TConstArrayView<FVector3f> VerticesWS,
 		TConstArrayView<uint32> Indices,
+		TConstArrayView<int32> TriangleTargetIds,
 		uint32 NumCellSamples,
 		uint32 MinMeshSamples,
 		uint32 MaxMeshSamples,

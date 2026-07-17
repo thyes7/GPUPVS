@@ -3,7 +3,9 @@
 struct FGPUPVSBox3f
 {
 	float3 Min;
+	float Pad0;
 	float3 Max;
+	float Pad1;
 };
 
 struct FGPUPVSBVHNode
@@ -19,11 +21,13 @@ StructuredBuffer<FGPUPVSBox3f> InMeshes;
 StructuredBuffer<FGPUPVSBox3f> InGroups;
 StructuredBuffer<uint> InMeshToGroup;
 StructuredBuffer<uint> InGroupVisibilityWords;
+StructuredBuffer<FGPUPVSBox3f> InOccluders;
 
 StructuredBuffer<FGPUPVSBVHNode> InBVHNodes;
 StructuredBuffer<uint> InBVHLeafTriIndices;
 StructuredBuffer<float3> InVertices;
 StructuredBuffer<uint> InIndices;
+StructuredBuffer<int> InTriangleTargetIds;
 
 uint NumCells;
 uint NumMeshes;
@@ -51,14 +55,14 @@ void StatAdd(uint Index, uint Value)
 	}
 }
 
-uint HashUint(uint x)
+uint HashUint(uint X)
 {
-	x ^= x >> 16;
-	x *= 0x7feb352d;
-	x ^= x >> 15;
-	x *= 0x846ca68b;
-	x ^= x >> 16;
-	return x;
+	X ^= X >> 16;
+	X *= 0x7feb352d;
+	X ^= X >> 15;
+	X *= 0x846ca68b;
+	X ^= X >> 16;
+	return X;
 }
 
 float Rand01(inout uint State)
@@ -70,21 +74,27 @@ float Rand01(inout uint State)
 float3 BoxCenter(FGPUPVSBox3f B) { return (B.Min + B.Max) * 0.5f; }
 float3 BoxExtent(FGPUPVSBox3f B) { return (B.Max - B.Min) * 0.5f; }
 
-bool RayAABB(float3 O, float3 D, float3 BMin, float3 BMax, float TMax, out float TEnter, out float TExit)
+float3 SafeNormalize3(float3 V)
 {
-	float3 InvD = 1.0f / D;
-	float3 T0 = (BMin - O) * InvD;
-	float3 T1 = (BMax - O) * InvD;
-	float3 TMin3 = min(T0, T1);
-	float3 TMax3 = max(T0, T1);
-	float TMin = max(TMin3.x, max(TMin3.y, TMin3.z));
-	float TMaxLocal = min(TMax3.x, min(TMax3.y, TMax3.z));
-	TEnter = TMin;
-	TExit = TMaxLocal;
-	return (TMaxLocal >= max(TMin, 0.0f)) && (TMin <= TMax);
+	float LenSq = dot(V, V);
+	return LenSq > 1e-8f ? V * rsqrt(LenSq) : float3(0.0f, 0.0f, 1.0f);
 }
 
-bool RayTri(float3 O, float3 D, float3 V0, float3 V1, float3 V2, out float T)
+bool IntersectAABB(float3 RayOrigin, float3 RayInvDir, float3 BoxMin, float3 BoxMax, out float TMin, out float TMax)
+{
+	float3 T0 = (BoxMin - RayOrigin) * RayInvDir;
+	float3 T1 = (BoxMax - RayOrigin) * RayInvDir;
+
+	float3 TNear = min(T0, T1);
+	float3 TFar = max(T0, T1);
+
+	TMin = max(max(TNear.x, TNear.y), TNear.z);
+	TMax = min(min(TFar.x, TFar.y), TFar.z);
+
+	return TMin <= TMax && TMax > 0.0f;
+}
+
+bool IntersectTriangle(float3 O, float3 D, float3 V0, float3 V1, float3 V2, out float T)
 {
 	float3 E1 = V1 - V0;
 	float3 E2 = V2 - V0;
@@ -95,84 +105,166 @@ bool RayTri(float3 O, float3 D, float3 V0, float3 V1, float3 V2, out float T)
 		T = 0.0f;
 		return false;
 	}
+
 	float InvDet = 1.0f / Det;
-	float3 Tvec = O - V0;
-	float U = dot(Tvec, P) * InvDet;
+	float3 TVec = O - V0;
+	float U = dot(TVec, P) * InvDet;
 	if (U < 0.0f || U > 1.0f)
 	{
 		T = 0.0f;
 		return false;
 	}
-	float3 Q = cross(Tvec, E1);
+
+	float3 Q = cross(TVec, E1);
 	float V = dot(D, Q) * InvDet;
 	if (V < 0.0f || (U + V) > 1.0f)
 	{
 		T = 0.0f;
 		return false;
 	}
+
 	float TT = dot(E2, Q) * InvDet;
 	if (TT <= 1e-4f)
 	{
 		T = 0.0f;
 		return false;
 	}
+
 	T = TT;
 	return true;
 }
 
-bool TraverseBVHAnyHit(float3 O, float3 D, float TMax, out float HitT)
+bool BoxesOverlap(float3 AMin, float3 AMax, float3 BMin, float3 BMax)
 {
-	HitT = TMax;
+	return (AMin.x <= BMax.x && AMax.x >= BMin.x) &&
+		(AMin.y <= BMax.y && AMax.y >= BMin.y) &&
+		(AMin.z <= BMax.z && AMax.z >= BMin.z);
+}
+
+bool TraceBVHAdvanced(
+	float3 RayOrigin,
+	float3 RayTarget,
+	uint IgnoredTargetId,
+	bool bSkipSelf,
+	bool bSkipOverlappingTargetBounds,
+	float3 TargetBoundsMin,
+	float3 TargetBoundsMax,
+	out float HitDistance)
+{
+	float3 RayDir = RayTarget - RayOrigin;
+	float MaxRayDistance = length(RayDir);
+	HitDistance = MaxRayDistance;
+
+	if (MaxRayDistance <= 1e-3f)
+	{
+		return false;
+	}
+
+	RayDir /= MaxRayDistance;
+	float3 RayInvDir = 1.0f / (RayDir + select(RayDir >= 0.0f, 1e-7f, -1e-7f));
 
 	uint Stack[64];
-	uint StackPtr = 0;
+	uint StackPtr = 0u;
 	Stack[StackPtr++] = 0u;
 
-	while (StackPtr > 0)
+	[loop]
+	while (StackPtr > 0u && StackPtr < 64u)
 	{
 		uint NodeIndex = Stack[--StackPtr];
-		FGPUPVSBVHNode N = InBVHNodes[NodeIndex];
+		FGPUPVSBVHNode Node = InBVHNodes[NodeIndex];
 
-		float TEnter, TExit;
-		if (!RayAABB(O, D, N.BoundsMin, N.BoundsMax, TMax, TEnter, TExit))
-		{
-			continue;
-		}
-
-		uint Right = N.RightChildOrTriCount;
+		uint Right = Node.RightChildOrTriCount;
 		if ((Right & 0x80000000u) != 0u)
 		{
-			uint FirstTri = N.LeftChildOrFirstTri;
-			uint TriCount = (Right & 0x7FFFFFFFu);
-			for (uint i = 0; i < TriCount; ++i)
+			uint FirstTri = Node.LeftChildOrFirstTri;
+			uint TriCount = (Right & 0x7fffffffu);
+
+			[loop]
+			for (uint I = 0u; I < TriCount; ++I)
 			{
-				uint TriIndex = InBVHLeafTriIndices[FirstTri + i];
-				uint I0 = InIndices[TriIndex * 3 + 0];
-				uint I1 = InIndices[TriIndex * 3 + 1];
-				uint I2 = InIndices[TriIndex * 3 + 2];
-				float3 V0 = InVertices[I0];
-				float3 V1 = InVertices[I1];
-				float3 V2 = InVertices[I2];
-				float T;
-				if (RayTri(O, D, V0, V1, V2, T) && T < TMax)
+				uint TriangleIndex = InBVHLeafTriIndices[FirstTri + I];
+				int TriangleTargetId = InTriangleTargetIds[TriangleIndex];
+				if (bSkipSelf && TriangleTargetId == (int)IgnoredTargetId)
 				{
-					HitT = T;
-					return true;
+					continue;
+				}
+
+				FGPUPVSBox3f OccBox = InOccluders[TriangleIndex];
+				if (bSkipOverlappingTargetBounds && BoxesOverlap(OccBox.Min, OccBox.Max, TargetBoundsMin, TargetBoundsMax))
+				{
+					continue;
+				}
+
+				float THitMin;
+				float THitMax;
+				if (IntersectAABB(RayOrigin, RayInvDir, OccBox.Min, OccBox.Max, THitMin, THitMax))
+				{
+					if (THitMin <= 0.1f)
+					{
+						continue;
+					}
+
+					if (THitMin < MaxRayDistance - 0.1f)
+					{
+						uint BaseIndex = TriangleIndex * 3u;
+						float3 V0 = InVertices[InIndices[BaseIndex + 0u]];
+						float3 V1 = InVertices[InIndices[BaseIndex + 1u]];
+						float3 V2 = InVertices[InIndices[BaseIndex + 2u]];
+						float TriangleT;
+						if (IntersectTriangle(RayOrigin, RayDir, V0, V1, V2, TriangleT) &&
+							TriangleT > 0.1f && TriangleT < MaxRayDistance - 0.1f)
+						{
+							HitDistance = TriangleT;
+							return true;
+						}
+					}
 				}
 			}
 		}
 		else
 		{
-			uint LeftChild = N.LeftChildOrFirstTri;
+			uint LeftChild = Node.LeftChildOrFirstTri;
 			uint RightChild = Right;
-			if (StackPtr + 2u <= 64u)
+
+			float TLeftMin;
+			float TLeftMax;
+			float TRightMin;
+			float TRightMax;
+			bool bHitLeft = IntersectAABB(RayOrigin, RayInvDir, InBVHNodes[LeftChild].BoundsMin, InBVHNodes[LeftChild].BoundsMax, TLeftMin, TLeftMax);
+			bool bHitRight = IntersectAABB(RayOrigin, RayInvDir, InBVHNodes[RightChild].BoundsMin, InBVHNodes[RightChild].BoundsMax, TRightMin, TRightMax);
+
+			if (bHitLeft && bHitRight)
 			{
-				Stack[StackPtr++] = RightChild;
-				Stack[StackPtr++] = LeftChild;
+				if (TLeftMin < TRightMin)
+				{
+					if (StackPtr < 62u)
+					{
+						Stack[StackPtr++] = RightChild;
+						Stack[StackPtr++] = LeftChild;
+					}
+				}
+				else
+				{
+					if (StackPtr < 62u)
+					{
+						Stack[StackPtr++] = LeftChild;
+						Stack[StackPtr++] = RightChild;
+					}
+				}
 			}
-			else
+			else if (bHitLeft)
 			{
-				return true;
+				if (StackPtr < 63u)
+				{
+					Stack[StackPtr++] = LeftChild;
+				}
+			}
+			else if (bHitRight)
+			{
+				if (StackPtr < 63u)
+				{
+					Stack[StackPtr++] = RightChild;
+				}
 			}
 		}
 	}
@@ -180,182 +272,288 @@ bool TraverseBVHAnyHit(float3 O, float3 D, float TMax, out float HitT)
 	return false;
 }
 
-uint ChooseFaceWeighted(float3 DirToTarget, inout uint Rng)
+float3 GetFaceDirection(uint FaceIndex)
 {
-	float3 D = normalize(DirToTarget);
-	float3 FaceN[6] = {
-		float3( 1, 0, 0), float3(-1, 0, 0),
-		float3( 0, 1, 0), float3( 0,-1, 0),
-		float3( 0, 0, 1), float3( 0, 0,-1)
-	};
+	if (FaceIndex == 0u) return float3(-1.0f, 0.0f, 0.0f);
+	if (FaceIndex == 1u) return float3(1.0f, 0.0f, 0.0f);
+	if (FaceIndex == 2u) return float3(0.0f, -1.0f, 0.0f);
+	if (FaceIndex == 3u) return float3(0.0f, 1.0f, 0.0f);
+	if (FaceIndex == 4u) return float3(0.0f, 0.0f, -1.0f);
+	return float3(0.0f, 0.0f, 1.0f);
+}
 
-	float W[6];
-	float Sum = 0.0f;
-	[unroll] for (uint i = 0; i < 6; ++i)
+float3 SampleBoxFace(float3 BoxMin, float3 BoxMax, uint FaceIndex, float U, float V)
+{
+	float3 P = lerp(BoxMin, BoxMax, float3(U, V, frac(U + V * 0.61803398875f)));
+
+	if (FaceIndex == 0u) P.x = BoxMin.x;
+	else if (FaceIndex == 1u) P.x = BoxMax.x;
+	else if (FaceIndex == 2u) P.y = BoxMin.y;
+	else if (FaceIndex == 3u) P.y = BoxMax.y;
+	else if (FaceIndex == 4u) P.z = BoxMin.z;
+	else P.z = BoxMax.z;
+
+	return P;
+}
+
+uint PickCellFace(float3 CellCenter, float3 TargetCenter, inout uint RNGState)
+{
+	float3 MeshToCell = SafeNormalize3(CellCenter - TargetCenter);
+	float Weights[6];
+	float WeightSum = 0.0f;
+
+	[unroll]
+	for (uint FaceIndex = 0u; FaceIndex < 6u; ++FaceIndex)
 	{
-		W[i] = max(0.0f, dot(-D, FaceN[i]));
-		Sum += W[i];
+		Weights[FaceIndex] = max(-dot(MeshToCell, GetFaceDirection(FaceIndex)), 0.0f);
+		WeightSum += Weights[FaceIndex];
 	}
 
-	if (Sum <= 1e-6f)
+	if (WeightSum <= 1e-6f)
 	{
-		return (uint)floor(Rand01(Rng) * 6.0f);
+		return min((uint)(Rand01(RNGState) * 6.0f), 5u);
 	}
 
-	float R = Rand01(Rng) * Sum;
-	float Acc = 0.0f;
-	[unroll] for (uint i = 0; i < 6; ++i)
+	float Pick = Rand01(RNGState) * WeightSum;
+	float Cumulative = 0.0f;
+	[unroll]
+	for (uint FaceIndex = 0u; FaceIndex < 6u; ++FaceIndex)
 	{
-		Acc += W[i];
-		if (R <= Acc)
+		Cumulative += Weights[FaceIndex];
+		if (Pick <= Cumulative)
 		{
-			return i;
+			return FaceIndex;
 		}
 	}
+
 	return 5u;
 }
 
-uint ChooseFaceFacing(float3 DirToTarget, inout uint Rng)
+uint PickTargetFace(float3 CellCenter, float3 TargetCenter, inout uint RNGState)
 {
-	float3 D = normalize(DirToTarget);
-	float3 FaceN[6] = {
-		float3( 1, 0, 0), float3(-1, 0, 0),
-		float3( 0, 1, 0), float3( 0,-1, 0),
-		float3( 0, 0, 1), float3( 0, 0,-1)
-	};
+	float3 MeshToCell = CellCenter - TargetCenter;
+	uint VisibleFaceCount = 0u;
 
-	uint Mask = 0u;
-	uint Count = 0u;
-	[unroll] for (uint i = 0; i < 6; ++i)
+	[unroll]
+	for (uint FaceIndex = 0u; FaceIndex < 6u; ++FaceIndex)
 	{
-		if (dot(D, FaceN[i]) > 0.0f)
+		if (dot(MeshToCell, GetFaceDirection(FaceIndex)) > 0.0f)
 		{
-			Mask |= (1u << i);
-			Count++;
+			VisibleFaceCount++;
 		}
 	}
 
-	if (Count == 0u)
+	if (VisibleFaceCount == 0u)
 	{
-		return (uint)floor(Rand01(Rng) * 6.0f);
+		return min((uint)(Rand01(RNGState) * 6.0f), 5u);
 	}
 
-	uint Pick = (uint)floor(Rand01(Rng) * (float)Count);
-	uint Seen = 0u;
-	[unroll] for (uint i = 0; i < 6; ++i)
+	uint DesiredFaceOrdinal = min((uint)(Rand01(RNGState) * (float)VisibleFaceCount), VisibleFaceCount - 1u);
+	uint CurrentFaceOrdinal = 0u;
+	[unroll]
+	for (uint FaceIndex = 0u; FaceIndex < 6u; ++FaceIndex)
 	{
-		if ((Mask & (1u << i)) != 0u)
+		if (dot(MeshToCell, GetFaceDirection(FaceIndex)) > 0.0f)
 		{
-			if (Seen == Pick) return i;
-			Seen++;
+			if (CurrentFaceOrdinal == DesiredFaceOrdinal)
+			{
+				return FaceIndex;
+			}
+			CurrentFaceOrdinal++;
 		}
 	}
+
 	return 0u;
 }
 
-float3 SamplePointOnBoxFace(FGPUPVSBox3f B, uint FaceIndex, float U, float V)
+void BuildCoordinateSystem(float3 AxisZ, out float3 AxisX, out float3 AxisY)
 {
-	float3 Min = B.Min;
-	float3 Max = B.Max;
-
-	if (FaceIndex == 0u) return float3(Max.x, lerp(Min.y, Max.y, U), lerp(Min.z, Max.z, V));
-	if (FaceIndex == 1u) return float3(Min.x, lerp(Min.y, Max.y, U), lerp(Min.z, Max.z, V));
-	if (FaceIndex == 2u) return float3(lerp(Min.x, Max.x, U), Max.y, lerp(Min.z, Max.z, V));
-	if (FaceIndex == 3u) return float3(lerp(Min.x, Max.x, U), Min.y, lerp(Min.z, Max.z, V));
-	if (FaceIndex == 4u) return float3(lerp(Min.x, Max.x, U), lerp(Min.y, Max.y, V), Max.z);
-	return float3(lerp(Min.x, Max.x, U), lerp(Min.y, Max.y, V), Min.z);
+	float3 Up = abs(AxisZ.z) < 0.999f ? float3(0.0f, 0.0f, 1.0f) : float3(0.0f, 1.0f, 0.0f);
+	AxisX = SafeNormalize3(cross(Up, AxisZ));
+	AxisY = cross(AxisZ, AxisX);
 }
 
-float3 JitterCone(float3 Dir, float ConeAngleRad, float U1, float U2)
+float3 UniformSampleSmallCone(float3 Axis, float U1, float U2)
 {
-	float CosMax = cos(ConeAngleRad);
-	float CosTheta = lerp(CosMax, 1.0f, U1);
-	float SinTheta = sqrt(max(0.0f, 1.0f - CosTheta * CosTheta));
+	const float CosThetaMax = 0.999390827f;
+	float CosTheta = lerp(CosThetaMax, 1.0f, U1);
+	float SinTheta = sqrt(max(1.0f - CosTheta * CosTheta, 0.0f));
 	float Phi = 6.28318530718f * U2;
 
-	float3 W = normalize(Dir);
-	float3 Up = abs(W.z) < 0.999f ? float3(0, 0, 1) : float3(0, 1, 0);
-	float3 U = normalize(cross(Up, W));
-	float3 V = cross(W, U);
-	return normalize(U * (cos(Phi) * SinTheta) + V * (sin(Phi) * SinTheta) + W * CosTheta);
+	float3 AxisX;
+	float3 AxisY;
+	BuildCoordinateSystem(Axis, AxisX, AxisY);
+
+	return SafeNormalize3(AxisX * cos(Phi) * SinTheta + AxisY * sin(Phi) * SinTheta + Axis * CosTheta);
 }
 
-bool ComputeBoxVisibility(FGPUPVSBox3f CellB, FGPUPVSBox3f MeshB, inout uint Rng, inout uint LocalRays, out uint ReasonMask)
+float3 GetConservativeBoxSample(FGPUPVSBox3f B, uint SampleIndex)
+{
+	float3 Center = 0.5f * (B.Min + B.Max);
+
+	if (SampleIndex == 0u) return Center;
+	if (SampleIndex == 1u) return float3(B.Min.x, Center.y, Center.z);
+	if (SampleIndex == 2u) return float3(B.Max.x, Center.y, Center.z);
+	if (SampleIndex == 3u) return float3(Center.x, B.Min.y, Center.z);
+	if (SampleIndex == 4u) return float3(Center.x, B.Max.y, Center.z);
+	if (SampleIndex == 5u) return float3(Center.x, Center.y, B.Min.z);
+	if (SampleIndex == 6u) return float3(Center.x, Center.y, B.Max.z);
+
+	uint CornerIndex = SampleIndex - 7u;
+	return float3(
+		(CornerIndex & 1u) != 0u ? B.Max.x : B.Min.x,
+		(CornerIndex & 2u) != 0u ? B.Max.y : B.Min.y,
+		(CornerIndex & 4u) != 0u ? B.Max.z : B.Min.z);
+}
+
+bool ComputeAdvancedBoxVisibility(
+	FGPUPVSBox3f CellB,
+	FGPUPVSBox3f TargetB,
+	uint CellIndex,
+	uint TargetIndex,
+	uint IgnoredTargetId,
+	bool bSkipSelf,
+	bool bSkipOverlappingTargetBounds,
+	inout uint LocalRays,
+	out uint ReasonMask)
 {
 	ReasonMask = 0u;
-	float3 CellC = BoxCenter(CellB);
-	float3 MeshC = BoxCenter(MeshB);
-	float3 ToMesh = MeshC - CellC;
-	float Dist = length(ToMesh);
-	if (Dist <= 1e-3f) return true;
-	if (MaxDistance > 0.0f && Dist > MaxDistance)
+
+	float3 CellCenter = BoxCenter(CellB);
+	float3 TargetCenter = BoxCenter(TargetB);
+	float3 ToTarget = TargetCenter - CellCenter;
+	float Distance = length(ToTarget);
+	if (Distance <= 1e-3f)
+	{
+		return true;
+	}
+
+	if (MaxDistance > 0.0f && Distance > MaxDistance)
 	{
 		ReasonMask |= 1u;
 		return false;
 	}
 
-	float3 Ext = BoxExtent(MeshB);
-	float MeshSize = length(Ext);
-	float SizeRatio = MeshSize / max(1.0f, Dist);
+	float TargetRadius = length(BoxExtent(TargetB));
+	float SizeRatio = TargetRadius / max(Distance, 1.0f);
 	if (SizeRatio > 1.0f)
 	{
 		ReasonMask |= 2u;
 		return true;
 	}
 
-	uint NumMS = (uint)clamp((int)floor(SizeRatio * (float)MaxMeshSamples), (int)MinMeshSamples, (int)MaxMeshSamples);
-	float BestHitT = -1.0f;
-	float3 BestO = 0;
-	float3 BestD = 0;
-	float BestLen = 0.0f;
+	uint RNGState = HashUint(CellIndex * 73856093u ^ TargetIndex * 19349663u ^ 0xA5B35705u);
+	uint NumPrimaryRays = (uint)clamp((int)floor(SizeRatio * (float)MaxMeshSamples), (int)MinMeshSamples, (int)MaxMeshSamples);
 
-	for (uint CS = 0u; CS < NumCellSamples; ++CS)
+	float FurthestHitDistance = 0.0f;
+	float3 BestOrigin = CellCenter;
+	float3 BestDirection = SafeNormalize3(TargetCenter - CellCenter);
+	float BestRayLength = Distance;
+
+	const uint CellSampleCount = 7u;
+	const uint TargetSampleCount = 15u;
+	[loop]
+	for (uint CellSampleIndex = 0u; CellSampleIndex < CellSampleCount; ++CellSampleIndex)
 	{
-		uint CellFace = ChooseFaceWeighted(ToMesh, Rng);
-		float3 CellP = SamplePointOnBoxFace(CellB, CellFace, Rand01(Rng), Rand01(Rng));
+		float3 RayOrigin = GetConservativeBoxSample(CellB, CellSampleIndex);
 
-		for (uint MS = 0u; MS < NumMS; ++MS)
+		[loop]
+		for (uint TargetSampleIndex = 0u; TargetSampleIndex < TargetSampleCount; ++TargetSampleIndex)
 		{
-			uint MeshFace = ChooseFaceFacing(CellP - MeshC, Rng);
-			float3 MeshP = SamplePointOnBoxFace(MeshB, MeshFace, Rand01(Rng), Rand01(Rng));
-
-			float3 RayV = MeshP - CellP;
-			float RayLen = length(RayV);
-			if (RayLen <= 1e-3f) return true;
-
-			float3 RayD = RayV / RayLen;
-			float TMax = RayLen - 1e-3f;
-
-			float HitT;
+			float3 RayTarget = GetConservativeBoxSample(TargetB, TargetSampleIndex);
+			float HitDistance;
 			LocalRays++;
-			bool bHit = TraverseBVHAnyHit(CellP, RayD, TMax, HitT);
-			if (!bHit)
+
+			if (!TraceBVHAdvanced(
+				RayOrigin,
+				RayTarget,
+				IgnoredTargetId,
+				bSkipSelf,
+				bSkipOverlappingTargetBounds,
+				TargetB.Min,
+				TargetB.Max,
+				HitDistance))
 			{
 				ReasonMask |= 4u;
 				return true;
 			}
 
-			if (HitT > BestHitT)
+			if (HitDistance > FurthestHitDistance)
 			{
-				BestHitT = HitT;
-				BestO = CellP;
-				BestD = RayD;
-				BestLen = TMax;
+				FurthestHitDistance = HitDistance;
+				BestOrigin = RayOrigin;
+				BestDirection = SafeNormalize3(RayTarget - RayOrigin);
+				BestRayLength = length(RayTarget - RayOrigin);
 			}
 		}
 	}
 
-	if (NumImportanceSamples == 0u) return false;
-	if (BestHitT < 0.0f) return false;
-
-	const float ConeAngleRad = 0.034906585f;
-	for (uint IS = 0u; IS < NumImportanceSamples; ++IS)
+	[loop]
+	for (uint CellSample = 0u; CellSample < NumCellSamples; ++CellSample)
 	{
-		float3 JDir = JitterCone(BestD, ConeAngleRad, Rand01(Rng), Rand01(Rng));
-		float HitT;
+		uint CellFace = PickCellFace(CellCenter, TargetCenter, RNGState);
+		float CU = Rand01(RNGState);
+		float CV = Rand01(RNGState);
+		float3 RayOrigin = SampleBoxFace(CellB.Min, CellB.Max, CellFace, CU, CV);
+
+		[loop]
+		for (uint MeshSample = 0u; MeshSample < NumPrimaryRays; ++MeshSample)
+		{
+			uint TargetFace = PickTargetFace(CellCenter, TargetCenter, RNGState);
+			float TU = Rand01(RNGState);
+			float TV = Rand01(RNGState);
+			float3 RayTarget = SampleBoxFace(TargetB.Min, TargetB.Max, TargetFace, TU, TV);
+
+			float HitDistance;
+			LocalRays++;
+			if (!TraceBVHAdvanced(
+				RayOrigin,
+				RayTarget,
+				IgnoredTargetId,
+				bSkipSelf,
+				bSkipOverlappingTargetBounds,
+				TargetB.Min,
+				TargetB.Max,
+				HitDistance))
+			{
+				ReasonMask |= 4u;
+				return true;
+			}
+
+			if (HitDistance > FurthestHitDistance)
+			{
+				FurthestHitDistance = HitDistance;
+				BestOrigin = RayOrigin;
+				BestDirection = SafeNormalize3(RayTarget - RayOrigin);
+				BestRayLength = length(RayTarget - RayOrigin);
+			}
+		}
+	}
+
+	if (NumImportanceSamples == 0u || FurthestHitDistance <= 0.0f || BestRayLength <= 1e-3f)
+	{
+		return false;
+	}
+
+	[loop]
+	for (uint ImportanceIndex = 0u; ImportanceIndex < NumImportanceSamples; ++ImportanceIndex)
+	{
+		float U1 = Rand01(RNGState);
+		float U2 = Rand01(RNGState);
+		float3 ConeDirection = UniformSampleSmallCone(BestDirection, U1, U2);
+		float3 ConeTarget = BestOrigin + ConeDirection * BestRayLength;
+
+		float HitDistance;
 		LocalRays++;
-		bool bHit = TraverseBVHAnyHit(BestO, JDir, BestLen, HitT);
-		if (!bHit)
+		if (!TraceBVHAdvanced(
+			BestOrigin,
+			ConeTarget,
+			IgnoredTargetId,
+			bSkipSelf,
+			bSkipOverlappingTargetBounds,
+			TargetB.Min,
+			TargetB.Max,
+			HitDistance))
 		{
 			ReasonMask |= 8u;
 			return true;
@@ -370,7 +568,10 @@ void MainGroupCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupThrea
 {
 	uint GroupIndex = DispatchThreadId.x;
 	uint CellIndex = DispatchThreadId.y;
-	if (GroupIndex >= NumGroups || CellIndex >= NumCells) return;
+	if (GroupIndex >= NumGroups || CellIndex >= NumCells)
+	{
+		return;
+	}
 
 	FGPUPVSBox3f CellB = InCells[CellIndex];
 	FGPUPVSBox3f GroupB = InGroups[GroupIndex];
@@ -380,10 +581,18 @@ void MainGroupCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupThrea
 	GroupB.Min = C - E;
 	GroupB.Max = C + E;
 
-	uint Seed = HashUint(CellIndex * 73856093u ^ GroupIndex * 19349663u ^ 0xC0FFEE17u);
 	uint LocalRays = 0u;
 	uint ReasonMask = 0u;
-	bool bVisible = ComputeBoxVisibility(CellB, GroupB, Seed, LocalRays, ReasonMask);
+	bool bVisible = ComputeAdvancedBoxVisibility(
+		CellB,
+		GroupB,
+		CellIndex,
+		GroupIndex,
+		0xffffffffu,
+		false,
+		true,
+		LocalRays,
+		ReasonMask);
 
 	StatAdd(0u, 1u);
 	StatAdd(7u, LocalRays);
@@ -407,53 +616,22 @@ bool IsGroupVisible(uint CellIndex, uint GroupIndex)
 }
 
 [numthreads(THREADS_X, THREADS_Y, 1)]
-void MainCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupThreadID, uint3 DispatchThreadId : SV_DispatchThreadID)
-{
-	uint MeshIndex = DispatchThreadId.x;
-	uint CellIndex = DispatchThreadId.y;
-	if (MeshIndex >= NumMeshes || CellIndex >= NumCells) return;
-
-	FGPUPVSBox3f CellB = InCells[CellIndex];
-	FGPUPVSBox3f MeshB = InMeshes[MeshIndex];
-
-	float3 C = BoxCenter(MeshB);
-	float3 E = BoxExtent(MeshB) * MeshBoundsScale;
-	MeshB.Min = C - E;
-	MeshB.Max = C + E;
-
-	uint Seed = HashUint(CellIndex * 73856093u ^ MeshIndex * 19349663u ^ 0xA5B35705u);
-	uint LocalRays = 0u;
-	uint ReasonMask = 0u;
-	bool bVisible = ComputeBoxVisibility(CellB, MeshB, Seed, LocalRays, ReasonMask);
-
-	StatAdd(0u, 1u);
-	StatAdd(7u, LocalRays);
-	if ((ReasonMask & 1u) != 0u) StatAdd(2u, 1u);
-	if ((ReasonMask & 2u) != 0u) StatAdd(3u, 1u);
-	if ((ReasonMask & 4u) != 0u) StatAdd(5u, 1u);
-	if ((ReasonMask & 8u) != 0u) StatAdd(6u, 1u);
-	if (!bVisible) return;
-
-	StatAdd(1u, 1u);
-	uint WordIndex = CellIndex * WordsPerCell + (MeshIndex >> 5);
-	uint Bit = 1u << (MeshIndex & 31u);
-	InterlockedOr(OutVisibilityWords[WordIndex], Bit);
-}
-
-[numthreads(THREADS_X, THREADS_Y, 1)]
 void MainMeshCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupThreadID, uint3 DispatchThreadId : SV_DispatchThreadID)
 {
 	uint MeshIndex = DispatchThreadId.x;
 	uint CellIndex = DispatchThreadId.y;
-	if (MeshIndex >= NumMeshes || CellIndex >= NumCells) return;
+	if (MeshIndex >= NumMeshes || CellIndex >= NumCells)
+	{
+		return;
+	}
 
 	uint GroupIndex = InMeshToGroup[MeshIndex];
-	if (GroupIndex != 0xFFFFFFFFu && GroupIndex < NumGroups)
+	if (GroupIndex != 0xffffffffu && GroupIndex < NumGroups)
 	{
 		if (!IsGroupVisible(CellIndex, GroupIndex))
 		{
+			// 这里保留统计，但不再直接硬跳过 mesh pass，避免 group false negative 污染最终结果。
 			StatAdd(4u, 1u);
-			return;
 		}
 	}
 
@@ -465,10 +643,18 @@ void MainMeshCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupThread
 	MeshB.Min = C - E;
 	MeshB.Max = C + E;
 
-	uint Seed = HashUint(CellIndex * 73856093u ^ MeshIndex * 19349663u ^ 0xA5B35705u);
 	uint LocalRays = 0u;
 	uint ReasonMask = 0u;
-	bool bVisible = ComputeBoxVisibility(CellB, MeshB, Seed, LocalRays, ReasonMask);
+	bool bVisible = ComputeAdvancedBoxVisibility(
+		CellB,
+		MeshB,
+		CellIndex,
+		MeshIndex,
+		MeshIndex,
+		true,
+		false,
+		LocalRays,
+		ReasonMask);
 
 	StatAdd(0u, 1u);
 	StatAdd(7u, LocalRays);
@@ -483,4 +669,3 @@ void MainMeshCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupThread
 	uint Bit = 1u << (MeshIndex & 31u);
 	InterlockedOr(OutVisibilityWords[WordIndex], Bit);
 }
-

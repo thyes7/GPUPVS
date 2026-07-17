@@ -6,7 +6,7 @@
 /**
  * GPUPVS 日志分类（按阶段输出）
  */
-DECLARE_LOG_CATEGORY_EXTERN(LogGPUPVS, Log, All);
+GPUPVS_API DECLARE_LOG_CATEGORY_EXTERN(LogGPUPVS, Log, All);
 
 /**
  * 统一前缀：

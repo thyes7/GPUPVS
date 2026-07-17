@@ -6,7 +6,9 @@
 #include "Modules/ModuleInterface.h"
 
 class FGPUPVS;
+class UGPUPVSSceneData;
 class UWorld;
+DECLARE_DELEGATE_RetVal_OneParam(UGPUPVSSceneData*, FGPUPVSSceneDataSaver, FGPUPVS&);
 
 /**
  * GPUPVS Runtime 模块：
@@ -27,7 +29,11 @@ public:
 	FGPUPVS* GetOrCreatePVSForWorld(UWorld* World);
 	FGPUPVS* FindPVSForWorld(UWorld* World) const;
 	void DestroyPVSForWorld(UWorld* World);
+	void RegisterSceneDataSaver(FGPUPVSSceneDataSaver InSaver);
+	void UnregisterSceneDataSaver();
+	UGPUPVSSceneData* SaveSceneDataAsset(FGPUPVS& System) const;
 
 private:
 	TMap<UWorld*, class FGPUPVS*> WorldToPVSMap;
+	FGPUPVSSceneDataSaver SceneDataSaver;
 };

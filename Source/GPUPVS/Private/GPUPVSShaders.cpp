@@ -2,31 +2,12 @@
  * GPUPVS RDG/Shader 调度实现。
  *
  * 当前包含：
- * - SimpleComputeShader：用于验证 RDG + Compute 流程的最小样例。
  * - GPUPVSRasterAABBCS：将三角形数据栅格化为 (X,Y) 高度层（Setup 阶段使用）。
  */
 #include "GPUPVSShaders.h"
 
 #include "RenderGraphUtils.h"
 #include "RHICommandList.h"
-
-// ========================================
-// FSimpleCS 实现
-// ========================================
-bool FSimpleCS::ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
-{
-    return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
-}
-
-void FSimpleCS::ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
-{
-    FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
-    OutEnvironment.SetDefine(TEXT("THREADS_X"), 8);
-    OutEnvironment.SetDefine(TEXT("THREADS_Y"), 8);
-}
-
-// 着色器注册
-IMPLEMENT_GLOBAL_SHADER(FSimpleCS, "/Plugin/GPUPVS/Private/SimpleComputeShader.usf", "MainCS", SF_Compute);
 
 bool FRasterAABBCS::ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
 {
@@ -68,46 +49,9 @@ void FVisibilityMeshCS::ModifyCompilationEnvironment(const FGlobalShaderPermutat
 
 IMPLEMENT_GLOBAL_SHADER(FVisibilityMeshCS, "/Plugin/GPUPVS/Private/GPUPVSVisibilityCS.usf", "MainMeshCS", SF_Compute);
 
-bool FVisibilityCS::ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
-{
-	return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
-}
-
-void FVisibilityCS::ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
-{
-	FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
-	OutEnvironment.SetDefine(TEXT("THREADS_X"), 8);
-	OutEnvironment.SetDefine(TEXT("THREADS_Y"), 8);
-}
-
-IMPLEMENT_GLOBAL_SHADER(FVisibilityCS, "/Plugin/GPUPVS/Private/GPUPVSVisibilityCS.usf", "MainCS", SF_Compute);
-
 // ========================================
 // FShaderDispatcher 实现
 // ========================================
-void FShaderDispatcher::DispatchSimpleCS(FRDGBuilder& GraphBuilder, uint32 IntA, uint32 IntB)
-{
-	// 创建输出缓冲（1 个 int32）
-	FRDGBufferDesc BufferDesc = FRDGBufferDesc::CreateStructuredDesc(sizeof(int32), 1);
-	FRDGBufferRef  OutputBuffer = GraphBuilder.CreateBuffer(BufferDesc, TEXT("GPUPVS_Result"));
-	FRDGBufferUAVRef OutputUAV = GraphBuilder.CreateUAV(OutputBuffer);
-
-	// 绑定参数
-	FSimpleCS::FParameters* Parameters = GraphBuilder.AllocParameters<FSimpleCS::FParameters>();
-	Parameters->IntA = IntA;
-	Parameters->IntB = IntB;
-	Parameters->OutputBuffer = OutputUAV;
-
-	TShaderMapRef<FSimpleCS> SimpleShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
-
-	FComputeShaderUtils::AddPass(
-		GraphBuilder,
-		RDG_EVENT_NAME("SimpleComputePass"),
-		SimpleShader,
-		Parameters,
-		FIntVector(1, 1, 1));
-}
-
 FShaderDispatcher::FRasterAABBOutputs FShaderDispatcher::DispatchRasterAABB(
     FRDGBuilder& GraphBuilder,
     TConstArrayView<FVector3f> VerticesWS,
@@ -187,151 +131,16 @@ FShaderDispatcher::FRasterAABBOutputs FShaderDispatcher::DispatchRasterAABB(
     return Outputs;
 }
 
-FShaderDispatcher::FVisibilityOutputs FShaderDispatcher::DispatchVisibility(
-	FRDGBuilder& GraphBuilder,
-	TConstArrayView<FGPUPVSBox3f> Cells,
-	TConstArrayView<FGPUPVSBox3f> Meshes,
-	TConstArrayView<FGPUPVSBVHNodeGPU> BVHNodes,
-	TConstArrayView<uint32> BVHLeafTriIndices,
-	TConstArrayView<FVector3f> VerticesWS,
-	TConstArrayView<uint32> Indices,
-	uint32 NumCellSamples,
-	uint32 MinMeshSamples,
-	uint32 MaxMeshSamples,
-	uint32 NumImportanceSamples,
-	float MeshBoundsScale,
-	float MaxDistance)
-{
-	FVisibilityOutputs Outputs;
-
-	const uint32 NumCells = (uint32)Cells.Num();
-	const uint32 NumMeshes = (uint32)Meshes.Num();
-	const uint32 NumTriangles = (uint32)(Indices.Num() / 3);
-	if (NumCells == 0 || NumMeshes == 0 || NumTriangles == 0 || VerticesWS.IsEmpty() || BVHNodes.IsEmpty() || BVHLeafTriIndices.IsEmpty())
-	{
-		return Outputs;
-	}
-
-	const uint32 WordsPerCell = FMath::DivideAndRoundUp(NumMeshes, 32u);
-	const uint32 TotalWords = NumCells * WordsPerCell;
-
-	// bitset（u32 words），GPU 用 InterlockedOr 写位，避免线程间写冲突。
-
-	FRDGBufferRef CellsBuffer = CreateStructuredBuffer(
-		GraphBuilder,
-		TEXT("GPUPVS.Visibility.Cells"),
-		sizeof(FGPUPVSBox3f),
-		Cells.Num(),
-		Cells.GetData(),
-		Cells.Num() * sizeof(FGPUPVSBox3f));
-	FRDGBufferSRVRef CellsSRV = GraphBuilder.CreateSRV(CellsBuffer);
-
-	FRDGBufferRef MeshesBuffer = CreateStructuredBuffer(
-		GraphBuilder,
-		TEXT("GPUPVS.Visibility.Meshes"),
-		sizeof(FGPUPVSBox3f),
-		Meshes.Num(),
-		Meshes.GetData(),
-		Meshes.Num() * sizeof(FGPUPVSBox3f));
-	FRDGBufferSRVRef MeshesSRV = GraphBuilder.CreateSRV(MeshesBuffer);
-
-	FRDGBufferRef BVHNodesBuffer = CreateStructuredBuffer(
-		GraphBuilder,
-		TEXT("GPUPVS.Visibility.BVHNodes"),
-		sizeof(FGPUPVSBVHNodeGPU),
-		BVHNodes.Num(),
-		BVHNodes.GetData(),
-		BVHNodes.Num() * sizeof(FGPUPVSBVHNodeGPU));
-	FRDGBufferSRVRef BVHNodesSRV = GraphBuilder.CreateSRV(BVHNodesBuffer);
-
-	FRDGBufferRef BVHLeafTrisBuffer = CreateStructuredBuffer(
-		GraphBuilder,
-		TEXT("GPUPVS.Visibility.BVHLeafTriIndices"),
-		sizeof(uint32),
-		BVHLeafTriIndices.Num(),
-		BVHLeafTriIndices.GetData(),
-		BVHLeafTriIndices.Num() * sizeof(uint32));
-	FRDGBufferSRVRef BVHLeafTrisSRV = GraphBuilder.CreateSRV(BVHLeafTrisBuffer, PF_R32_UINT);
-
-	FRDGBufferRef VerticesBuffer = CreateStructuredBuffer(
-		GraphBuilder,
-		TEXT("GPUPVS.Visibility.Vertices"),
-		sizeof(FVector3f),
-		VerticesWS.Num(),
-		VerticesWS.GetData(),
-		VerticesWS.Num() * sizeof(FVector3f));
-	FRDGBufferSRVRef VerticesSRV = GraphBuilder.CreateSRV(VerticesBuffer);
-
-	FRDGBufferRef IndicesBuffer = CreateStructuredBuffer(
-		GraphBuilder,
-		TEXT("GPUPVS.Visibility.Indices"),
-		sizeof(uint32),
-		Indices.Num(),
-		Indices.GetData(),
-		Indices.Num() * sizeof(uint32));
-	FRDGBufferSRVRef IndicesSRV = GraphBuilder.CreateSRV(IndicesBuffer, PF_R32_UINT);
-
-	FRDGBufferRef VisibilityWordsBuffer = GraphBuilder.CreateBuffer(
-		FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), TotalWords),
-		TEXT("GPUPVS.Visibility.OutWords"));
-	FRDGBufferUAVRef VisibilityWordsUAV = GraphBuilder.CreateUAV(VisibilityWordsBuffer);
-	AddClearUAVPass(GraphBuilder, VisibilityWordsUAV, 0);
-
-	FRDGBufferRef StatsBuffer = GraphBuilder.CreateBuffer(
-		FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), 8),
-		TEXT("GPUPVS.Visibility.OutStats"));
-	FRDGBufferUAVRef StatsUAV = GraphBuilder.CreateUAV(StatsBuffer);
-	AddClearUAVPass(GraphBuilder, StatsUAV, 0);
-
-	FVisibilityCS::FParameters* Parameters = GraphBuilder.AllocParameters<FVisibilityCS::FParameters>();
-	Parameters->NumCells = NumCells;
-	Parameters->NumMeshes = NumMeshes;
-	Parameters->WordsPerCell = WordsPerCell;
-	Parameters->NumCellSamples = NumCellSamples;
-	Parameters->MinMeshSamples = MinMeshSamples;
-	Parameters->MaxMeshSamples = MaxMeshSamples;
-	Parameters->NumImportanceSamples = NumImportanceSamples;
-	Parameters->MeshBoundsScale = MeshBoundsScale;
-	Parameters->MaxDistance = MaxDistance;
-	Parameters->EnableStats = 1u;
-	Parameters->InCells = CellsSRV;
-	Parameters->InMeshes = MeshesSRV;
-	Parameters->InBVHNodes = BVHNodesSRV;
-	Parameters->InBVHLeafTriIndices = BVHLeafTrisSRV;
-	Parameters->InVertices = VerticesSRV;
-	Parameters->InIndices = IndicesSRV;
-	Parameters->OutVisibilityWords = VisibilityWordsUAV;
-	Parameters->OutStats = StatsUAV;
-
-	TShaderMapRef<FVisibilityCS> Shader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
-
-	const uint32 GroupCountX = FMath::DivideAndRoundUp(NumMeshes, 8u);
-	const uint32 GroupCountY = FMath::DivideAndRoundUp(NumCells, 8u);
-
-	// numthreads(THREADS_X, THREADS_Y) 对应 dispatch 的 GroupCountX/Y
-
-	FComputeShaderUtils::AddPass(
-		GraphBuilder,
-		RDG_EVENT_NAME("GPUPVS.Visibility"),
-		Shader,
-		Parameters,
-		FIntVector((int32)GroupCountX, (int32)GroupCountY, 1));
-
-	Outputs.VisibilityWords = VisibilityWordsBuffer;
-	Outputs.Stats = StatsBuffer;
-	Outputs.NumMeshes = NumMeshes;
-	Outputs.WordsPerCell = WordsPerCell;
-	return Outputs;
-}
-
 FShaderDispatcher::FVisibilityGroupOutputs FShaderDispatcher::DispatchVisibilityGroups(
 	FRDGBuilder& GraphBuilder,
 	TConstArrayView<FGPUPVSBox3f> Cells,
 	TConstArrayView<FGPUPVSBox3f> Groups,
+	TConstArrayView<FGPUPVSBox3f> OccluderBoxes,
 	TConstArrayView<FGPUPVSBVHNodeGPU> BVHNodes,
 	TConstArrayView<uint32> BVHLeafTriIndices,
 	TConstArrayView<FVector3f> VerticesWS,
 	TConstArrayView<uint32> Indices,
+	TConstArrayView<int32> TriangleTargetIds,
 	uint32 NumCellSamples,
 	uint32 MinMeshSamples,
 	uint32 MaxMeshSamples,
@@ -344,7 +153,8 @@ FShaderDispatcher::FVisibilityGroupOutputs FShaderDispatcher::DispatchVisibility
 	const uint32 NumCells = (uint32)Cells.Num();
 	const uint32 NumGroups = (uint32)Groups.Num();
 	const uint32 NumTriangles = (uint32)(Indices.Num() / 3);
-	if (NumCells == 0 || NumGroups == 0 || NumTriangles == 0 || VerticesWS.IsEmpty() || BVHNodes.IsEmpty() || BVHLeafTriIndices.IsEmpty())
+	if (NumCells == 0 || NumGroups == 0 || NumTriangles == 0 || VerticesWS.IsEmpty() || BVHNodes.IsEmpty() || BVHLeafTriIndices.IsEmpty()
+		|| OccluderBoxes.Num() != NumTriangles || TriangleTargetIds.Num() != NumTriangles)
 	{
 		return Outputs;
 	}
@@ -370,6 +180,15 @@ FShaderDispatcher::FVisibilityGroupOutputs FShaderDispatcher::DispatchVisibility
 		Groups.Num() * sizeof(FGPUPVSBox3f));
 	FRDGBufferSRVRef GroupsSRV = GraphBuilder.CreateSRV(GroupsBuffer);
 
+	FRDGBufferRef OccludersBuffer = CreateStructuredBuffer(
+		GraphBuilder,
+		TEXT("GPUPVS.Visibility.Occluders"),
+		sizeof(FGPUPVSBox3f),
+		OccluderBoxes.Num(),
+		OccluderBoxes.GetData(),
+		OccluderBoxes.Num() * sizeof(FGPUPVSBox3f));
+	FRDGBufferSRVRef OccludersSRV = GraphBuilder.CreateSRV(OccludersBuffer);
+
 	FRDGBufferRef BVHNodesBuffer = CreateStructuredBuffer(
 		GraphBuilder,
 		TEXT("GPUPVS.Visibility.BVHNodes"),
@@ -405,6 +224,15 @@ FShaderDispatcher::FVisibilityGroupOutputs FShaderDispatcher::DispatchVisibility
 		Indices.GetData(),
 		Indices.Num() * sizeof(uint32));
 	FRDGBufferSRVRef IndicesSRV = GraphBuilder.CreateSRV(IndicesBuffer, PF_R32_UINT);
+
+	FRDGBufferRef TriangleTargetIdsBuffer = CreateStructuredBuffer(
+		GraphBuilder,
+		TEXT("GPUPVS.Visibility.TriangleTargetIds"),
+		sizeof(int32),
+		TriangleTargetIds.Num(),
+		TriangleTargetIds.GetData(),
+		TriangleTargetIds.Num() * sizeof(int32));
+	FRDGBufferSRVRef TriangleTargetIdsSRV = GraphBuilder.CreateSRV(TriangleTargetIdsBuffer, PF_R32_SINT);
 
 	FRDGBufferRef VisibilityWordsBuffer = GraphBuilder.CreateBuffer(
 		FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), TotalWords),
@@ -431,10 +259,12 @@ FShaderDispatcher::FVisibilityGroupOutputs FShaderDispatcher::DispatchVisibility
 	Parameters->EnableStats = 1u;
 	Parameters->InCells = CellsSRV;
 	Parameters->InGroups = GroupsSRV;
+	Parameters->InOccluders = OccludersSRV;
 	Parameters->InBVHNodes = BVHNodesSRV;
 	Parameters->InBVHLeafTriIndices = BVHLeafTrisSRV;
 	Parameters->InVertices = VerticesSRV;
 	Parameters->InIndices = IndicesSRV;
+	Parameters->InTriangleTargetIds = TriangleTargetIdsSRV;
 	Parameters->OutVisibilityWords = VisibilityWordsUAV;
 	Parameters->OutStats = StatsUAV;
 
@@ -464,10 +294,12 @@ FShaderDispatcher::FVisibilityOutputs FShaderDispatcher::DispatchVisibilityMeshe
 	FRDGBufferRef GroupVisibilityWords,
 	uint32 NumGroups,
 	uint32 GroupWordsPerCell,
+	TConstArrayView<FGPUPVSBox3f> OccluderBoxes,
 	TConstArrayView<FGPUPVSBVHNodeGPU> BVHNodes,
 	TConstArrayView<uint32> BVHLeafTriIndices,
 	TConstArrayView<FVector3f> VerticesWS,
 	TConstArrayView<uint32> Indices,
+	TConstArrayView<int32> TriangleTargetIds,
 	uint32 NumCellSamples,
 	uint32 MinMeshSamples,
 	uint32 MaxMeshSamples,
@@ -480,7 +312,9 @@ FShaderDispatcher::FVisibilityOutputs FShaderDispatcher::DispatchVisibilityMeshe
 	const uint32 NumCells = (uint32)Cells.Num();
 	const uint32 NumMeshes = (uint32)Meshes.Num();
 	const uint32 NumTriangles = (uint32)(Indices.Num() / 3);
-	if (NumCells == 0 || NumMeshes == 0 || NumTriangles == 0 || VerticesWS.IsEmpty() || BVHNodes.IsEmpty() || BVHLeafTriIndices.IsEmpty() || MeshToGroup.Num() != Meshes.Num() || !GroupVisibilityWords)
+	if (NumCells == 0 || NumMeshes == 0 || NumTriangles == 0 || VerticesWS.IsEmpty() || BVHNodes.IsEmpty() || BVHLeafTriIndices.IsEmpty()
+		|| MeshToGroup.Num() != Meshes.Num() || !GroupVisibilityWords
+		|| OccluderBoxes.Num() != NumTriangles || TriangleTargetIds.Num() != NumTriangles)
 	{
 		return Outputs;
 	}
@@ -505,6 +339,15 @@ FShaderDispatcher::FVisibilityOutputs FShaderDispatcher::DispatchVisibilityMeshe
 		Meshes.GetData(),
 		Meshes.Num() * sizeof(FGPUPVSBox3f));
 	FRDGBufferSRVRef MeshesSRV = GraphBuilder.CreateSRV(MeshesBuffer);
+
+	FRDGBufferRef OccludersBuffer = CreateStructuredBuffer(
+		GraphBuilder,
+		TEXT("GPUPVS.Visibility.Occluders"),
+		sizeof(FGPUPVSBox3f),
+		OccluderBoxes.Num(),
+		OccluderBoxes.GetData(),
+		OccluderBoxes.Num() * sizeof(FGPUPVSBox3f));
+	FRDGBufferSRVRef OccludersSRV = GraphBuilder.CreateSRV(OccludersBuffer);
 
 	FRDGBufferRef MeshToGroupBuffer = CreateStructuredBuffer(
 		GraphBuilder,
@@ -553,6 +396,15 @@ FShaderDispatcher::FVisibilityOutputs FShaderDispatcher::DispatchVisibilityMeshe
 		Indices.Num() * sizeof(uint32));
 	FRDGBufferSRVRef IndicesSRV = GraphBuilder.CreateSRV(IndicesBuffer, PF_R32_UINT);
 
+	FRDGBufferRef TriangleTargetIdsBuffer = CreateStructuredBuffer(
+		GraphBuilder,
+		TEXT("GPUPVS.Visibility.TriangleTargetIds"),
+		sizeof(int32),
+		TriangleTargetIds.Num(),
+		TriangleTargetIds.GetData(),
+		TriangleTargetIds.Num() * sizeof(int32));
+	FRDGBufferSRVRef TriangleTargetIdsSRV = GraphBuilder.CreateSRV(TriangleTargetIdsBuffer, PF_R32_SINT);
+
 	FRDGBufferRef VisibilityWordsBuffer = GraphBuilder.CreateBuffer(
 		FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), TotalWords),
 		TEXT("GPUPVS.Visibility.OutWords"));
@@ -582,10 +434,12 @@ FShaderDispatcher::FVisibilityOutputs FShaderDispatcher::DispatchVisibilityMeshe
 	Parameters->InMeshes = MeshesSRV;
 	Parameters->InMeshToGroup = MeshToGroupSRV;
 	Parameters->InGroupVisibilityWords = GroupVisibilitySRV;
+	Parameters->InOccluders = OccludersSRV;
 	Parameters->InBVHNodes = BVHNodesSRV;
 	Parameters->InBVHLeafTriIndices = BVHLeafTrisSRV;
 	Parameters->InVertices = VerticesSRV;
 	Parameters->InIndices = IndicesSRV;
+	Parameters->InTriangleTargetIds = TriangleTargetIdsSRV;
 	Parameters->OutVisibilityWords = VisibilityWordsUAV;
 	Parameters->OutStats = StatsUAV;
 

@@ -42,15 +42,9 @@ public class GPUPVS : ModuleRules
 				"Renderer",
 				"RHI",
 				"Projects",
-				"EditorFramework",
-				"UnrealEd",
-				"SlateCore",
-				"Slate",
-				"IntelOIDN",
 			}
 			);
-		
-		
+
 		DynamicallyLoadedModuleNames.AddRange(
 			new string[]
 			{

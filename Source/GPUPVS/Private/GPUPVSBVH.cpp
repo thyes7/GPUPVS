@@ -112,6 +112,15 @@ void FGPUPVSBVHBuilder::Build(
 		return;
 	}
 
+	const uint32 NumVertices = (uint32)VerticesWS.Num();
+	for (int32 i = 0; i < Indices.Num(); ++i)
+	{
+		if (Indices[i] >= NumVertices)
+		{
+			return;
+		}
+	}
+
 	TArray<FTriRef> TriRefs;
 	TriRefs.SetNumUninitialized((int32)NumTriangles);
 
